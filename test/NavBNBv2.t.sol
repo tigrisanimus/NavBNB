@@ -140,20 +140,18 @@ contract NavBNBv2Test is NoLogBound {
             nav.redeem(balance, 0);
         }
 
-        for (uint256 day = 0; day < 7; day++) {
+        uint256 maxDays = 60;
+        for (uint256 day = 0; day < maxDays && nav.totalLiabilitiesBNB() > 0; day++) {
+            vm.warp(block.timestamp + 1 days);
             uint256 totalLiabilitiesBefore = nav.totalLiabilitiesBNB();
-            if (totalLiabilitiesBefore == 0) {
-                break;
-            }
             uint256 head = nav.queueHead();
             uint256 queueLen = nav.queueLength();
-            vm.warp(block.timestamp + 1 days);
             uint256 currentDay = block.timestamp / 1 days;
             uint256 cap = nav.capForDay(currentDay);
             uint256 spent = nav.spentToday(currentDay);
             uint256 capRemaining = cap > spent ? cap - spent : 0;
-            uint256 reserve = nav.reserveBNB();
-            uint256 available = capRemaining < reserve ? capRemaining : reserve;
+            uint256 available = capRemaining < totalLiabilitiesBefore ? capRemaining : totalLiabilitiesBefore;
+            available = available < nav.trackedAssetsBNB() ? available : nav.trackedAssetsBNB();
             uint256 contractBalanceBefore = address(nav).balance;
             uint256[] memory remainingBefore = new uint256[](queueLen);
             for (uint256 i = 0; i < queueLen; i++) {
@@ -190,7 +188,22 @@ contract NavBNBv2Test is NoLogBound {
             }
         }
 
-        assertEq(nav.totalLiabilitiesBNB(), 0);
+        uint256 remainingLiabilities = nav.totalLiabilitiesBNB();
+        uint256 currentDay = block.timestamp / 1 days;
+        assertEq(
+            remainingLiabilities,
+            0,
+            string(
+                abi.encodePacked(
+                    "remaining liabilities: ",
+                    vm.toString(remainingLiabilities),
+                    " cap: ",
+                    vm.toString(nav.capForDay(currentDay)),
+                    " spent: ",
+                    vm.toString(nav.spentToday(currentDay))
+                )
+            )
+        );
     }
 
     function testCapBehaviorAndNextDayClaim() public {

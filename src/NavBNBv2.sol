@@ -128,7 +128,7 @@ contract NavBNBv2 {
         if (msg.value == 0) {
             revert ZeroDeposit();
         }
-        if (totalSupply > 0 && reserveBNB() == 0) {
+        if (totalSupply > 0 && trackedAssetsBNB < totalLiabilitiesBNB) {
             revert Insolvent();
         }
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
@@ -147,7 +147,7 @@ contract NavBNBv2 {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
-        if (totalSupply > 0 && reserveBNB() == 0) {
+        if (totalSupply > 0 && trackedAssetsBNB < totalLiabilitiesBNB) {
             revert Insolvent();
         }
         uint256 currentNav = nav();
@@ -170,12 +170,12 @@ contract NavBNBv2 {
         if (totalLiabilitiesBNB > 0) {
             bnbQueued = bnbAfterFee;
         } else {
-            uint256 available = _availableForDay(day);
-            if (available >= bnbAfterFee) {
+            uint256 capRemaining = _capRemaining(day);
+            if (capRemaining >= bnbAfterFee) {
                 bnbPaid = bnbAfterFee;
             } else {
-                bnbPaid = available;
-                bnbQueued = bnbAfterFee - available;
+                bnbPaid = capRemaining;
+                bnbQueued = bnbAfterFee - capRemaining;
             }
         }
 
@@ -207,15 +207,16 @@ contract NavBNBv2 {
         if (totalLiabilitiesBNB == 0) {
             return;
         }
-        if (reserveBNB() == 0) {
+        if (trackedAssetsBNB < totalLiabilitiesBNB) {
             revert Insolvent();
         }
         uint256 day = _currentDay();
-        uint256 available = _availableForDay(day);
-        if (available == 0) {
-            emit CapExhausted(day, spentToday[day], _dayCap(day));
+        uint256 capRemaining = _capRemaining(day);
+        if (capRemaining == 0) {
             return;
         }
+        uint256 available = capRemaining < totalLiabilitiesBNB ? capRemaining : totalLiabilitiesBNB;
+        available = available < trackedAssetsBNB ? available : trackedAssetsBNB;
         uint256 head = queueHead;
         uint256 totalPaid;
         uint256 steps;
@@ -249,7 +250,7 @@ contract NavBNBv2 {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
-        if (reserveBNB() == 0) {
+        if (trackedAssetsBNB < totalLiabilitiesBNB) {
             revert Insolvent();
         }
         uint256 currentNav = nav();
@@ -262,7 +263,7 @@ contract NavBNBv2 {
         if (bnbOut < minBnbOut) {
             revert Slippage();
         }
-        if (bnbOut > reserveBNB()) {
+        if (bnbOut > trackedAssetsBNB - totalLiabilitiesBNB) {
             revert Insolvent();
         }
 
@@ -335,8 +336,8 @@ contract NavBNBv2 {
 
     function _availableForDay(uint256 day) internal view returns (uint256) {
         uint256 capRemaining = _capRemaining(day);
-        uint256 reserve = reserveBNB();
-        return capRemaining < reserve ? capRemaining : reserve;
+        uint256 available = capRemaining < totalLiabilitiesBNB ? capRemaining : totalLiabilitiesBNB;
+        return available < trackedAssetsBNB ? available : trackedAssetsBNB;
     }
 
     function _currentDay() internal view returns (uint256) {
