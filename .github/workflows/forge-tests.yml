@@ -28,5 +28,6 @@ jobs:
           which forge
           forge --version
           forge fmt --check
+          forge build
           forge test -vvv
           forge test -vvv --fuzz-runs 5000
