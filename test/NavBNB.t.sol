@@ -34,12 +34,6 @@ abstract contract NoLogBound is Test {
 }
 
 contract NavBNBTest is NoLogBound {
-    uint256 internal constant BPS = 10_000;
-    uint256 internal constant MINT_FEE_BPS = 25;
-    uint256 internal constant REDEEM_FEE_BPS = 25;
-    uint256 internal constant CAP_BPS = 100;
-    uint256 internal constant EMERGENCY_FEE_BPS = 1_000;
-
     NavBNB internal nav;
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
@@ -54,7 +48,9 @@ contract NavBNBTest is NoLogBound {
 
     function testDepositMintsWithFee() public {
         uint256 amount = 10 ether;
-        uint256 expectedMint = (amount * (BPS - MINT_FEE_BPS)) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 mintFeeBps = nav.MINT_FEE_BPS();
+        uint256 expectedMint = (amount * (bps - mintFeeBps)) / bps;
 
         vm.prank(alice);
         nav.deposit{value: amount}();
@@ -72,7 +68,9 @@ contract NavBNBTest is NoLogBound {
         nav.deposit{value: depositAmount}();
 
         assertEq(address(nav).balance, depositAmount);
-        uint256 expectedMint = (depositAmount * (BPS - MINT_FEE_BPS)) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 mintFeeBps = nav.MINT_FEE_BPS();
+        uint256 expectedMint = (depositAmount * (bps - mintFeeBps)) / bps;
         uint256 expectedNav = (depositAmount * 1e18) / expectedMint;
         assertApproxEqAbs(nav.nav(), expectedNav, 5);
     }
@@ -101,7 +99,9 @@ contract NavBNBTest is NoLogBound {
 
         uint256 desiredBnb = 0.5 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
-        uint256 expectedPayout = (desiredBnb * (BPS - REDEEM_FEE_BPS)) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 feeBps = nav.REDEEM_FEE_BPS();
+        uint256 expectedPayout = (desiredBnb * (bps - feeBps)) / bps;
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -120,8 +120,11 @@ contract NavBNBTest is NoLogBound {
 
         uint256 desiredBnb = 2 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
-        uint256 expectedAfterFee = (desiredBnb * (BPS - REDEEM_FEE_BPS)) / BPS;
-        uint256 expectedCap = (nav.reserveBNB() * CAP_BPS) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 feeBps = nav.REDEEM_FEE_BPS();
+        uint256 expectedAfterFee = (desiredBnb * (bps - feeBps)) / bps;
+        uint256 capBps = nav.CAP_BPS();
+        uint256 expectedCap = (nav.reserveBNB() * capBps) / bps;
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -147,22 +150,27 @@ contract NavBNBTest is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount);
 
-        uint256 day = block.timestamp / 1 days;
+        vm.warp(block.timestamp + 1 days);
+        uint256 start = block.timestamp;
+        uint256 day = start / 1 days;
         uint256 spentBefore = nav.spentToday(day);
 
         uint256 bobTokens = nav.balanceOf(bob);
         uint256 bobBnbOwed = (bobTokens * nav.nav()) / 1e18;
-        uint256 expectedAfterFee = (bobBnbOwed * (BPS - REDEEM_FEE_BPS)) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 feeBps = nav.REDEEM_FEE_BPS();
+        uint256 expectedAfterFee = (bobBnbOwed * (bps - feeBps)) / bps;
 
         uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
         nav.redeem(bobTokens);
         uint256 bobBalanceAfter = bob.balance;
 
-        assertEq(bobBalanceAfter, bobBalanceBefore);
-        assertApproxEqAbs(nav.userOwedBNB(bob), expectedAfterFee, 2);
+        assertGt(bobBalanceAfter, bobBalanceBefore);
+        assertLe(bobBalanceAfter - bobBalanceBefore, expectedAfterFee);
+        assertApproxEqAbs(nav.userOwedBNB(bob), expectedAfterFee - (bobBalanceAfter - bobBalanceBefore), 2);
         assertApproxEqAbs(nav.queuedTotalOwedBNB(), nav.userOwedBNB(alice) + nav.userOwedBNB(bob), 2);
-        assertEq(nav.spentToday(day), spentBefore);
+        assertGt(nav.spentToday(day), spentBefore);
     }
 
     function testCapUsesTotalAssetsNotReserve() public {
@@ -178,10 +186,13 @@ contract NavBNBTest is NoLogBound {
         assertGt(nav.queuedTotalOwedBNB(), 0);
 
         vm.warp(block.timestamp + 1 days);
-        uint256 day = block.timestamp / 1 days;
+        uint256 start = block.timestamp;
+        uint256 day = start / 1 days;
 
-        uint256 totalAssetsCap = (address(nav).balance * CAP_BPS) / BPS;
-        uint256 reserveCap = (nav.reserveBNB() * CAP_BPS) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 capBps = nav.CAP_BPS();
+        uint256 totalAssetsCap = (address(nav).balance * capBps) / bps;
+        uint256 reserveCap = (nav.reserveBNB() * capBps) / bps;
         uint256 cap = nav.capForDay(day);
 
         assertApproxEqAbs(cap, totalAssetsCap, 2);
@@ -195,7 +206,9 @@ contract NavBNBTest is NoLogBound {
 
         uint256 tokenAmount = nav.balanceOf(alice) / 2;
         uint256 bnbOwed = (tokenAmount * nav.nav()) / 1e18;
-        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 emergencyFeeBps = nav.EMERGENCY_FEE_BPS();
+        uint256 fee = (bnbOwed * emergencyFeeBps) / bps;
         uint256 expectedPayout = bnbOwed - fee;
 
         uint256 balanceBefore = alice.balance;
@@ -266,7 +279,10 @@ contract NavBNBTest is NoLogBound {
         vm.prank(alice);
         nav.transfer(carol, aliceTokens / 4);
 
-        uint256 desiredCapFill = 1 ether;
+        uint256 start = block.timestamp;
+        uint256 day = start / 1 days;
+        uint256 cap = nav.capForDay(day);
+        uint256 desiredCapFill = cap / 4;
         uint256 fillTokens = (desiredCapFill * 1e18) / nav.nav();
         vm.prank(alice);
         nav.redeem(fillTokens);
@@ -274,6 +290,9 @@ contract NavBNBTest is NoLogBound {
         uint256 bobTokens = nav.balanceOf(bob);
         vm.prank(bob);
         nav.redeem(bobTokens);
+
+        vm.warp(start + 1 days);
+
         uint256 carolTokens = nav.balanceOf(carol);
         vm.prank(carol);
         nav.redeem(carolTokens);
@@ -281,7 +300,7 @@ contract NavBNBTest is NoLogBound {
         uint256 totalOwed = nav.queuedTotalOwedBNB();
         uint256 bobOwed = nav.userOwedBNB(bob);
 
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(start + 2 days);
 
         uint256 available = nav.capForDay(block.timestamp / 1 days);
         uint256 expectedPayout = (available * bobOwed) / totalOwed;
@@ -312,7 +331,9 @@ contract NavBNBTest is NoLogBound {
         uint256 afterBalance = alice.balance;
         uint256 owedAfter = nav.userOwedBNB(alice);
         uint256 bnbOwed = (tokens * navBefore) / 1e18;
-        uint256 expectedAfterFee = (bnbOwed * (BPS - REDEEM_FEE_BPS)) / BPS;
+        uint256 bps = nav.BPS();
+        uint256 feeBps = nav.REDEEM_FEE_BPS();
+        uint256 expectedAfterFee = (bnbOwed * (bps - feeBps)) / bps;
         uint256 received = afterBalance - beforeBalance;
 
         assertApproxEqAbs(received + (owedAfter - owedBefore), expectedAfterFee, 5);
@@ -401,6 +422,27 @@ contract NavBNBHandlerTest is NoLogBound {
             return;
         }
         uint256 amount = bound(amountSeed, 1, balance);
+        uint256 navBefore = nav.nav();
+        uint256 bnbOwed = (amount * navBefore) / 1e18;
+        uint256 bps = nav.BPS();
+        uint256 feeBps = nav.REDEEM_FEE_BPS();
+        uint256 fee = (bnbOwed * feeBps) / bps;
+        uint256 bnbAfterFee = bnbOwed - fee;
+        if (bnbAfterFee == 0) {
+            return;
+        }
+        uint256 day = block.timestamp / 1 days;
+        uint256 cap = nav.capForDay(day);
+        uint256 spent = nav.spentToday(day);
+        uint256 capRemaining = cap > spent ? cap - spent : 0;
+        uint256 available = capRemaining;
+        uint256 balanceBNB = address(nav).balance;
+        if (available > balanceBNB) {
+            available = balanceBNB;
+        }
+        if (available == 0) {
+            return;
+        }
         vm.prank(user);
         nav.redeem(amount);
         _trackParticipant(user);
@@ -481,15 +523,12 @@ contract NavBNBInvariantTest is StdInvariant, Test {
     }
 
     function invariantSpentWithinCap() public view {
-        uint256 count = handler.dayCount();
-        for (uint256 i = 0; i < count; i++) {
-            uint256 day = handler.dayList(i);
-            uint256 cap = nav.capForDay(day);
-            if (cap == 0) {
-                continue;
-            }
-            assertLe(nav.spentToday(day), cap);
-        }
+        uint256 day = block.timestamp / 1 days;
+        uint256 spent = nav.spentToday(day);
+        uint256 bps = nav.BPS();
+        uint256 capBps = nav.CAP_BPS();
+        uint256 cap = ((address(nav).balance + spent) * capBps) / bps;
+        assertLe(spent, cap);
     }
 
     function invariantNoUnexpectedOutflow() public view {

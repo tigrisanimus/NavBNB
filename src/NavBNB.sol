@@ -19,7 +19,6 @@ contract NavBNB {
     mapping(address => uint256) public userOwedBNB;
     uint256 public queuedTotalOwedBNB;
     mapping(uint256 => uint256) public spentToday;
-    mapping(uint256 => uint256) public dayCap;
 
     uint256 private locked;
 
@@ -90,18 +89,10 @@ contract NavBNB {
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
         uint256 fee = (bnbOwed * REDEEM_FEE_BPS) / BPS;
         uint256 bnbAfterFee = bnbOwed - fee;
-
-        _burn(msg.sender, tokenAmount);
-
-        if (queuedTotalOwedBNB > 0) {
-            userOwedBNB[msg.sender] += bnbAfterFee;
-            queuedTotalOwedBNB += bnbAfterFee;
-            emit Redeem(msg.sender, tokenAmount, 0, bnbAfterFee);
-            return;
-        }
+        require(bnbAfterFee > 0, "ROUNDING");
 
         uint256 day = _currentDay();
-        uint256 cap = _dayCap(day);
+        uint256 cap = _dayCap();
         uint256 spent = spentToday[day];
         uint256 capRemaining = cap > spent ? cap - spent : 0;
         uint256 available = capRemaining;
@@ -109,6 +100,7 @@ contract NavBNB {
         if (available > balance) {
             available = balance;
         }
+        require(available > 0, "CAP_REACHED");
 
         uint256 bnbPaid;
         uint256 bnbQueued;
@@ -121,9 +113,9 @@ contract NavBNB {
             bnbQueued = bnbAfterFee;
         }
 
-        if (bnbPaid > 0) {
-            spentToday[day] = spent + bnbPaid;
-        }
+        _burn(msg.sender, tokenAmount);
+
+        spentToday[day] = spent + bnbPaid;
         if (bnbQueued > 0) {
             userOwedBNB[msg.sender] += bnbQueued;
             queuedTotalOwedBNB += bnbQueued;
@@ -141,7 +133,7 @@ contract NavBNB {
         uint256 owed = userOwedBNB[msg.sender];
         require(owed > 0, "NOTHING_OWED");
         uint256 day = _currentDay();
-        uint256 cap = _dayCap(day);
+        uint256 cap = _dayCap();
         uint256 spent = spentToday[day];
         uint256 capRemaining = cap > spent ? cap - spent : 0;
         uint256 available = capRemaining;
@@ -203,18 +195,12 @@ contract NavBNB {
     }
 
     function capForDay(uint256 day) external view returns (uint256) {
-        if (dayCap[day] == 0) {
-            return (totalAssetsBNB() * CAP_BPS) / BPS;
-        }
-        return dayCap[day];
+        day;
+        return (totalAssetsBNB() * CAP_BPS) / BPS;
     }
 
-    function _dayCap(uint256 day) internal returns (uint256 cap) {
-        cap = dayCap[day];
-        if (cap == 0) {
-            cap = (totalAssetsBNB() * CAP_BPS) / BPS;
-            dayCap[day] = cap;
-        }
+    function _dayCap() internal view returns (uint256 cap) {
+        cap = (totalAssetsBNB() * CAP_BPS) / BPS;
     }
 
     function emergencyRedeem(uint256 tokenAmount) external nonReentrant {
