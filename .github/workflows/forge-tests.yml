@@ -11,22 +11,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Foundry (forge)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          curl -L https://foundry.paradigm.xyz | bash
-          "$HOME/.foundry/bin/foundryup"
-          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
-          "$HOME/.foundry/bin/forge" --version
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
 
       - name: Run tests
         shell: bash
         run: |
           set -euxo pipefail
-          export PATH="$HOME/.foundry/bin:$PATH"
           which forge
           forge --version
+          forge fmt --check
           forge test -vvv
           forge test -vvv --fuzz-runs 5000
