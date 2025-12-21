@@ -38,6 +38,7 @@ contract NavBNBTest is NoLogBound {
     uint256 internal constant MINT_FEE_BPS = 25;
     uint256 internal constant REDEEM_FEE_BPS = 25;
     uint256 internal constant CAP_BPS = 100;
+    uint256 internal constant EMERGENCY_FEE_BPS = 1_000;
 
     NavBNB internal nav;
     address internal alice = address(0xA11CE);
@@ -106,6 +107,65 @@ contract NavBNBTest is NoLogBound {
         assertApproxEqAbs(balanceAfter - balanceBefore, expectedCap, 2);
         assertApproxEqAbs(nav.userOwedBNB(alice), expectedAfterFee - expectedCap, 2);
         assertApproxEqAbs(nav.queuedTotalOwedBNB(), expectedAfterFee - expectedCap, 2);
+    }
+
+    function testCapUsesTotalAssetsNotReserve() public {
+        uint256 depositAmount = 0.01 ether;
+        vm.prank(alice);
+        nav.deposit{value: depositAmount}();
+
+        uint256 desiredBnb = 0.009 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount);
+
+        assertGt(nav.queuedTotalOwedBNB(), 0);
+
+        vm.warp(block.timestamp + 1 days);
+        uint256 day = block.timestamp / 1 days;
+
+        uint256 totalAssetsCap = (address(nav).balance * CAP_BPS) / BPS;
+        uint256 reserveCap = (nav.reserveBNB() * CAP_BPS) / BPS;
+        uint256 cap = nav.capForDay(day);
+
+        assertApproxEqAbs(cap, totalAssetsCap, 2);
+        assertGt(cap, reserveCap);
+    }
+
+    function testEmergencyRedeemWorksWhenNoQueue() public {
+        uint256 depositAmount = 10 ether;
+        vm.prank(alice);
+        nav.deposit{value: depositAmount}();
+
+        uint256 tokenAmount = nav.balanceOf(alice) / 2;
+        uint256 bnbOwed = (tokenAmount * nav.nav()) / 1e18;
+        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
+        uint256 expectedPayout = bnbOwed - fee;
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeem(tokenAmount);
+        uint256 balanceAfter = alice.balance;
+
+        assertApproxEqAbs(balanceAfter - balanceBefore, expectedPayout, 2);
+        assertEq(nav.balanceOf(alice), nav.totalSupply());
+    }
+
+    function testEmergencyRedeemRevertsWhenQueueExists() public {
+        uint256 depositAmount = 10 ether;
+        vm.prank(alice);
+        nav.deposit{value: depositAmount}();
+
+        uint256 desiredBnb = 5 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount);
+
+        assertGt(nav.queuedTotalOwedBNB(), 0);
+
+        vm.prank(alice);
+        vm.expectRevert(NavBNB.QueueExists.selector);
+        nav.emergencyRedeem(1);
     }
 
     function testDepositRevertsWhenFullyQueued() public {
