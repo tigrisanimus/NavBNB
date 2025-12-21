@@ -13,6 +13,14 @@ Foundry consists of:
 
 https://book.getfoundry.sh/
 
+## Security Notes
+
+- No admin keys or privileged roles.
+- Global daily cap with queued, pro-rata claims when demand exceeds the cap.
+- Emergency exit with a fixed fee (10% via `EMERGENCY_FEE_BPS`).
+- Reentrancy protection; BNB is sent via `call` guarded by `nonReentrant` and CEI.
+- Tradeoffs: withdrawals can be delayed under heavy demand; `emergencyRedeem` trades a fee for immediacy.
+
 ## Usage
 
 ### Build

@@ -133,6 +133,38 @@ contract NavBNBTest is NoLogBound {
         assertApproxEqAbs(nav.queuedTotalOwedBNB(), expectedAfterFee - expectedCap, 2);
     }
 
+    function testRedeemQueuesWhenQueueExistsDoesNotConsumeCap() public {
+        uint256 depositAmount = 100 ether;
+        vm.prank(alice);
+        nav.deposit{value: depositAmount}();
+
+        vm.startPrank(alice);
+        nav.transfer(bob, nav.balanceOf(alice) / 4);
+        vm.stopPrank();
+
+        uint256 desiredBnb = 2 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount);
+
+        uint256 day = block.timestamp / 1 days;
+        uint256 spentBefore = nav.spentToday(day);
+
+        uint256 bobTokens = nav.balanceOf(bob);
+        uint256 bobBnbOwed = (bobTokens * nav.nav()) / 1e18;
+        uint256 expectedAfterFee = (bobBnbOwed * (BPS - REDEEM_FEE_BPS)) / BPS;
+
+        uint256 bobBalanceBefore = bob.balance;
+        vm.prank(bob);
+        nav.redeem(bobTokens);
+        uint256 bobBalanceAfter = bob.balance;
+
+        assertEq(bobBalanceAfter, bobBalanceBefore);
+        assertApproxEqAbs(nav.userOwedBNB(bob), expectedAfterFee, 2);
+        assertApproxEqAbs(nav.queuedTotalOwedBNB(), nav.userOwedBNB(alice) + nav.userOwedBNB(bob), 2);
+        assertEq(nav.spentToday(day), spentBefore);
+    }
+
     function testCapUsesTotalAssetsNotReserve() public {
         uint256 depositAmount = 0.01 ether;
         vm.prank(alice);
@@ -197,6 +229,17 @@ contract NavBNBTest is NoLogBound {
         assertEq(nav.queuedTotalOwedBNB(), queuedBefore - owedBefore);
         assertEq(nav.queuedTotalOwedBNB(), nav.userOwedBNB(alice));
         assertEq(nav.reserveBNB(), address(nav).balance - nav.queuedTotalOwedBNB());
+    }
+
+    function testEmergencyRedeemRevertsOnRounding() public {
+        vm.prank(alice);
+        nav.deposit{value: 1 ether}();
+
+        vm.store(address(nav), bytes32(uint256(4)), bytes32(uint256(0.9 ether)));
+
+        vm.prank(alice);
+        vm.expectRevert(bytes("ROUNDING"));
+        nav.emergencyRedeem(1);
     }
 
     function testDepositRevertsWhenFullyQueued() public {
