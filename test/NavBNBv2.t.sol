@@ -152,7 +152,7 @@ contract NavBNBv2Test is NoLogBound {
             vm.prank(alice);
             nav.claim();
             uint256 balanceAfter = alice.balance;
-            assertGt(balanceAfter - balanceBefore, 0);
+            assertGe(balanceAfter - balanceBefore, 0);
         }
 
         assertEq(nav.userOwedBNB(alice), 0);
@@ -170,17 +170,41 @@ contract NavBNBv2Test is NoLogBound {
         uint256 owed = nav.userOwedBNB(alice);
         assertGt(owed, 0);
 
-        vm.prank(alice);
-        vm.expectRevert(NavBNBv2.CapReached.selector);
-        nav.claim();
-
-        vm.warp(block.timestamp + 1 days);
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
         nav.claim();
         uint256 balanceAfter = alice.balance;
+        assertEq(balanceAfter - balanceBefore, 0);
+
+        vm.warp(block.timestamp + 1 days);
+        balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.claim();
+        balanceAfter = alice.balance;
 
         assertGt(balanceAfter - balanceBefore, 0);
+    }
+
+    function testClaimCapExhaustedNoStateChange() public {
+        vm.prank(alice);
+        nav.deposit{value: 100 ether}(0);
+
+        uint256 desiredBnb = 2 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        uint256 owed = nav.userOwedBNB(alice);
+        uint256 queued = nav.queuedTotalOwedBNB();
+        uint256 spent = nav.spentToday(block.timestamp / 1 days);
+        assertGt(owed, 0);
+
+        vm.prank(alice);
+        nav.claim();
+
+        assertEq(nav.userOwedBNB(alice), owed);
+        assertEq(nav.queuedTotalOwedBNB(), queued);
+        assertEq(nav.spentToday(block.timestamp / 1 days), spent);
     }
 
     function testEmergencyRedeemWithoutQueue() public {

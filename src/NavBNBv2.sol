@@ -45,6 +45,7 @@ contract NavBNBv2 {
     event Paused(address indexed account);
     event Unpaused(address indexed account);
     event RecoverSurplus(address indexed to, uint256 amount);
+    event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -205,13 +206,10 @@ contract NavBNBv2 {
             revert Insolvent();
         }
         uint256 day = _currentDay();
-        uint256 capRemaining = _capRemaining(day);
-        if (capRemaining == 0) {
-            revert CapReached();
-        }
         uint256 available = _availableForDay(day);
         if (available == 0) {
-            revert CapReached();
+            emit CapExhausted(day, spentToday[day], _dayCap(day));
+            return;
         }
         uint256 remaining = available;
         uint256 head = queueHead;
