@@ -64,6 +64,30 @@ contract NavBNBTest is NoLogBound {
         assertGt(nav.nav(), 1e18);
     }
 
+    function testDepositAfterOrphanedReserveSweeps() public {
+        _createOrphanedReserve();
+        uint256 depositAmount = 0.001 ether;
+
+        vm.prank(bob);
+        nav.deposit{value: depositAmount}();
+
+        assertEq(address(nav).balance, depositAmount);
+        uint256 expectedMint = (depositAmount * (BPS - MINT_FEE_BPS)) / BPS;
+        uint256 expectedNav = (depositAmount * 1e18) / expectedMint;
+        assertApproxEqAbs(nav.nav(), expectedNav, 5);
+    }
+
+    function testSweepOrphanedReserveZerosBalance() public {
+        _createOrphanedReserve();
+        assertEq(nav.totalSupply(), 0);
+        assertEq(nav.queuedTotalOwedBNB(), 0);
+        assertGt(address(nav).balance, 0);
+
+        nav.sweepOrphanedReserve();
+
+        assertEq(address(nav).balance, 0);
+    }
+
     function testMetadata() public view {
         assertEq(nav.name(), "NavBNB");
         assertEq(nav.symbol(), "nBNB");
@@ -276,6 +300,24 @@ contract NavBNBTest is NoLogBound {
         uint256 balanceAfter = bob.balance;
 
         assertLe(balanceAfter - balanceBefore, owedBefore);
+    }
+
+    function _createOrphanedReserve() internal {
+        vm.prank(alice);
+        nav.deposit{value: 1 ether}();
+
+        uint256 desiredBnb = 0.5 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount);
+
+        uint256 remainingTokens = nav.balanceOf(alice);
+        vm.prank(alice);
+        nav.emergencyRedeem(remainingTokens);
+
+        assertEq(nav.totalSupply(), 0);
+        assertEq(nav.queuedTotalOwedBNB(), 0);
+        assertGt(address(nav).balance, 0);
     }
 }
 
