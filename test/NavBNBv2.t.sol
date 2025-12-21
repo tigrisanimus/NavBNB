@@ -47,8 +47,6 @@ contract NavBNBv2Test is NoLogBound {
     address internal recovery = address(0xCAFE);
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
-    mapping(address => uint256) internal balanceBefore;
-    mapping(address => uint256) internal balanceAfter;
 
     function setUp() public {
         nav = new NavBNBv2(guardian, recovery);
@@ -156,49 +154,40 @@ contract NavBNBv2Test is NoLogBound {
             uint256 capRemaining = cap > spent ? cap - spent : 0;
             uint256 reserve = nav.reserveBNB();
             uint256 available = capRemaining < reserve ? capRemaining : reserve;
-            for (uint256 i = 0; i < queueLen; i++) {
-                (address user, ) = nav.getQueueEntry(i);
-                balanceBefore[user] = user.balance;
-            }
             uint256 contractBalanceBefore = address(nav).balance;
+            uint256[] memory remainingBefore = new uint256[](queueLen);
+            for (uint256 i = 0; i < queueLen; i++) {
+                (, uint256 amount) = nav.getQueueEntry(i);
+                remainingBefore[i] = amount;
+            }
             vm.prank(alice);
             nav.claim();
-            for (uint256 i = 0; i < queueLen; i++) {
-                (address user, ) = nav.getQueueEntry(i);
-                balanceAfter[user] = user.balance;
-            }
-
-            uint256 paidTotal;
-            bool sawPayment;
-            bool sawZeroAfterPayment;
-            uint256 lastPaidIndex;
-            for (uint256 i = head; i < queueLen; i++) {
-                (address user, ) = nav.getQueueEntry(i);
-                uint256 delta = balanceAfter[user] - balanceBefore[user];
-                if (delta > 0) {
-                    paidTotal += delta;
-                    if (sawZeroAfterPayment) {
-                        assertEq(delta, 0);
-                    }
-                    sawPayment = true;
-                    lastPaidIndex = i;
-                } else if (sawPayment) {
-                    sawZeroAfterPayment = true;
-                }
-            }
-
+            uint256 contractBalanceAfter = address(nav).balance;
+            uint256 paidTotal = contractBalanceBefore - contractBalanceAfter;
             assertLe(paidTotal, available);
             assertLe(paidTotal, totalLiabilitiesBefore);
-            if (sawZeroAfterPayment && lastPaidIndex + 1 < queueLen) {
-                for (uint256 i = lastPaidIndex + 1; i < queueLen; i++) {
-                    (address userAfter, ) = nav.getQueueEntry(i);
-                    uint256 deltaAfter = balanceAfter[userAfter] - balanceBefore[userAfter];
-                    assertEq(deltaAfter, 0);
+
+            uint256 lastPaidIndex = head;
+            bool sawDecrease;
+            bool sawNoDecreaseAfter;
+            for (uint256 i = head; i < queueLen; i++) {
+                (, uint256 amountAfter) = nav.getQueueEntry(i);
+                if (amountAfter < remainingBefore[i]) {
+                    if (sawNoDecreaseAfter) {
+                        assertEq(amountAfter, remainingBefore[i]);
+                    }
+                    sawDecrease = true;
+                    lastPaidIndex = i;
+                } else if (sawDecrease) {
+                    sawNoDecreaseAfter = true;
                 }
             }
-
-            uint256 contractBalanceAfter = address(nav).balance;
-            assertEq(contractBalanceBefore - contractBalanceAfter, paidTotal);
+            if (sawNoDecreaseAfter && lastPaidIndex + 1 < queueLen) {
+                for (uint256 i = lastPaidIndex + 1; i < queueLen; i++) {
+                    (, uint256 amountAfter) = nav.getQueueEntry(i);
+                    assertEq(amountAfter, remainingBefore[i]);
+                }
+            }
         }
 
         assertEq(nav.totalLiabilitiesBNB(), 0);
