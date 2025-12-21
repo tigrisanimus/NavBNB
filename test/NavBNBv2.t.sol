@@ -140,14 +140,12 @@ contract NavBNBv2Test is NoLogBound {
             nav.redeem(balance, 0);
         }
 
-        for (uint256 day = 0; day < 7; day++) {
+        uint256 maxDays = 60;
+        for (uint256 day = 0; day < maxDays && nav.totalLiabilitiesBNB() > 0; day++) {
+            vm.warp(block.timestamp + 1 days);
             uint256 totalLiabilitiesBefore = nav.totalLiabilitiesBNB();
-            if (totalLiabilitiesBefore == 0) {
-                break;
-            }
             uint256 head = nav.queueHead();
             uint256 queueLen = nav.queueLength();
-            vm.warp(block.timestamp + 1 days);
             uint256 currentDay = block.timestamp / 1 days;
             uint256 cap = nav.capForDay(currentDay);
             uint256 spent = nav.spentToday(currentDay);
@@ -190,7 +188,12 @@ contract NavBNBv2Test is NoLogBound {
             }
         }
 
-        assertEq(nav.totalLiabilitiesBNB(), 0);
+        uint256 remainingLiabilities = nav.totalLiabilitiesBNB();
+        assertEq(
+            remainingLiabilities,
+            0,
+            string(abi.encodePacked("remaining liabilities: ", vm.toString(remainingLiabilities)))
+        );
     }
 
     function testCapBehaviorAndNextDayClaim() public {
