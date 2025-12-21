@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Show versions
+        run: |
+          forge --version
+          cast --version
+
+      - name: Install deps
+        run: forge install
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Fuzz (more runs)
+        run: forge test -vvv --fuzz-runs 5000
