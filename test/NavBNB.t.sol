@@ -20,7 +20,7 @@ contract NavBNBTest is Test {
 
     function testDepositMintsWithFee() public {
         uint256 amount = 10 ether;
-        uint256 expectedMint = (amount * (NavBNB.BPS() - NavBNB.MINT_FEE_BPS())) / NavBNB.BPS();
+        uint256 expectedMint = (amount * (NavBNB.BPS - NavBNB.MINT_FEE_BPS)) / NavBNB.BPS;
 
         vm.prank(alice);
         nav.deposit{value: amount}();
@@ -37,7 +37,7 @@ contract NavBNBTest is Test {
 
         uint256 desiredBnb = 0.5 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
-        uint256 expectedPayout = (desiredBnb * (NavBNB.BPS() - NavBNB.REDEEM_FEE_BPS())) / NavBNB.BPS();
+        uint256 expectedPayout = (desiredBnb * (NavBNB.BPS - NavBNB.REDEEM_FEE_BPS)) / NavBNB.BPS;
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -56,8 +56,8 @@ contract NavBNBTest is Test {
 
         uint256 desiredBnb = 2 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
-        uint256 expectedAfterFee = (desiredBnb * (NavBNB.BPS() - NavBNB.REDEEM_FEE_BPS())) / NavBNB.BPS();
-        uint256 expectedCap = (nav.reserveBNB() * NavBNB.CAP_BPS()) / NavBNB.BPS();
+        uint256 expectedAfterFee = (desiredBnb * (NavBNB.BPS - NavBNB.REDEEM_FEE_BPS)) / NavBNB.BPS;
+        uint256 expectedCap = (nav.reserveBNB() * NavBNB.CAP_BPS) / NavBNB.BPS;
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -126,7 +126,7 @@ contract NavBNBTest is Test {
         uint256 afterBalance = alice.balance;
         uint256 owedAfter = nav.userOwedBNB(alice);
         uint256 bnbOwed = (tokens * navBefore) / 1e18;
-        uint256 expectedAfterFee = (bnbOwed * (NavBNB.BPS() - NavBNB.REDEEM_FEE_BPS())) / NavBNB.BPS();
+        uint256 expectedAfterFee = (bnbOwed * (NavBNB.BPS - NavBNB.REDEEM_FEE_BPS)) / NavBNB.BPS;
         uint256 received = afterBalance - beforeBalance;
 
         assertApproxEqAbs(received + (owedAfter - owedBefore), expectedAfterFee, 5);

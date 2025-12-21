@@ -104,7 +104,7 @@ contract NavBNB {
         }
 
         if (bnbPaid > 0) {
-            (bool success, ) = msg.sender.call{value: bnbPaid}();
+            (bool success, ) = msg.sender.call{value: bnbPaid}("");
             require(success, "BNB_SEND_FAIL");
         }
 
@@ -132,7 +132,7 @@ contract NavBNB {
         queuedTotalOwedBNB -= payout;
         spentToday[day] = spent + payout;
 
-        (bool success, ) = msg.sender.call{value: payout}();
+        (bool success, ) = msg.sender.call{value: payout}("");
         require(success, "BNB_SEND_FAIL");
 
         emit Claim(msg.sender, payout);
