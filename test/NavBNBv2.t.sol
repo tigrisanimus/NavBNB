@@ -189,10 +189,20 @@ contract NavBNBv2Test is NoLogBound {
         }
 
         uint256 remainingLiabilities = nav.totalLiabilitiesBNB();
+        uint256 currentDay = block.timestamp / 1 days;
         assertEq(
             remainingLiabilities,
             0,
-            string(abi.encodePacked("remaining liabilities: ", vm.toString(remainingLiabilities)))
+            string(
+                abi.encodePacked(
+                    "remaining liabilities: ",
+                    vm.toString(remainingLiabilities),
+                    " cap: ",
+                    vm.toString(nav.capForDay(currentDay)),
+                    " spent: ",
+                    vm.toString(nav.spentToday(currentDay))
+                )
+            )
         );
     }
 
