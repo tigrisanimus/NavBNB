@@ -138,8 +138,9 @@ contract NavBNBTest is NoLogBound {
         vm.prank(alice);
         nav.deposit{value: depositAmount}();
 
-        vm.prank(alice);
+        vm.startPrank(alice);
         nav.transfer(bob, nav.balanceOf(alice) / 4);
+        vm.stopPrank();
 
         uint256 desiredBnb = 2 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
