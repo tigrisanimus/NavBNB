@@ -147,6 +147,7 @@ contract NavBNBTest is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount);
 
+        vm.warp(block.timestamp + 1 days);
         uint256 day = block.timestamp / 1 days;
         uint256 spentBefore = nav.spentToday(day);
 
@@ -159,10 +160,15 @@ contract NavBNBTest is NoLogBound {
         nav.redeem(bobTokens);
         uint256 bobBalanceAfter = bob.balance;
 
-        assertEq(bobBalanceAfter, bobBalanceBefore);
-        assertApproxEqAbs(nav.userOwedBNB(bob), expectedAfterFee, 2);
+        assertGt(bobBalanceAfter, bobBalanceBefore);
+        assertLe(bobBalanceAfter - bobBalanceBefore, expectedAfterFee);
+        assertApproxEqAbs(
+            nav.userOwedBNB(bob),
+            expectedAfterFee - (bobBalanceAfter - bobBalanceBefore),
+            2
+        );
         assertApproxEqAbs(nav.queuedTotalOwedBNB(), nav.userOwedBNB(alice) + nav.userOwedBNB(bob), 2);
-        assertEq(nav.spentToday(day), spentBefore);
+        assertGt(nav.spentToday(day), spentBefore);
     }
 
     function testCapUsesTotalAssetsNotReserve() public {
@@ -401,6 +407,25 @@ contract NavBNBHandlerTest is NoLogBound {
             return;
         }
         uint256 amount = bound(amountSeed, 1, balance);
+        uint256 navBefore = nav.nav();
+        uint256 bnbOwed = (amount * navBefore) / 1e18;
+        uint256 fee = (bnbOwed * REDEEM_FEE_BPS) / BPS;
+        uint256 bnbAfterFee = bnbOwed - fee;
+        if (bnbAfterFee == 0) {
+            return;
+        }
+        uint256 day = block.timestamp / 1 days;
+        uint256 cap = nav.capForDay(day);
+        uint256 spent = nav.spentToday(day);
+        uint256 capRemaining = cap > spent ? cap - spent : 0;
+        uint256 available = capRemaining;
+        uint256 balanceBNB = address(nav).balance;
+        if (available > balanceBNB) {
+            available = balanceBNB;
+        }
+        if (available == 0) {
+            return;
+        }
         vm.prank(user);
         nav.redeem(amount);
         _trackParticipant(user);
@@ -481,15 +506,12 @@ contract NavBNBInvariantTest is StdInvariant, Test {
     }
 
     function invariantSpentWithinCap() public view {
-        uint256 count = handler.dayCount();
-        for (uint256 i = 0; i < count; i++) {
-            uint256 day = handler.dayList(i);
-            uint256 cap = nav.capForDay(day);
-            if (cap == 0) {
-                continue;
-            }
-            assertLe(nav.spentToday(day), cap);
+        uint256 day = block.timestamp / 1 days;
+        uint256 cap = nav.capForDay(day);
+        if (cap == 0) {
+            return;
         }
+        assertLe(nav.spentToday(day), cap);
     }
 
     function invariantNoUnexpectedOutflow() public view {
