@@ -5,7 +5,37 @@ import "forge-std/Test.sol";
 import "forge-std/StdInvariant.sol";
 import "src/NavBNB.sol";
 
-contract NavBNBTest is Test {
+abstract contract NoLogBound is Test {
+    uint256 internal constant UINT256_MAX = type(uint256).max;
+
+    function bound(uint256 x, uint256 min, uint256 max) internal pure override returns (uint256 result) {
+        return _bound(x, min, max);
+    }
+
+    function _bound(uint256 x, uint256 min, uint256 max) internal pure returns (uint256 result) {
+        require(min <= max, "StdUtils bound(uint256,uint256,uint256): Max is less than min.");
+        if (x >= min && x <= max) return x;
+
+        uint256 size = max - min + 1;
+
+        if (x <= 3 && size > x) return min + x;
+        if (x >= UINT256_MAX - 3 && size > UINT256_MAX - x) return max - (UINT256_MAX - x);
+
+        if (x > max) {
+            uint256 diff = x - max;
+            uint256 rem = diff % size;
+            if (rem == 0) return max;
+            result = min + rem - 1;
+        } else if (x < min) {
+            uint256 diff = min - x;
+            uint256 rem = diff % size;
+            if (rem == 0) return min;
+            result = max - rem + 1;
+        }
+    }
+}
+
+contract NavBNBTest is NoLogBound {
     uint256 internal constant BPS = 10_000;
     uint256 internal constant MINT_FEE_BPS = 25;
     uint256 internal constant REDEEM_FEE_BPS = 25;
@@ -165,7 +195,7 @@ contract NavBNBTest is Test {
     }
 }
 
-contract NavBNBHandlerTest is Test {
+contract NavBNBHandlerTest is NoLogBound {
     NavBNB internal nav;
     address[] public users;
     address[] public participants;
@@ -267,7 +297,7 @@ contract NavBNBInvariantTest is StdInvariant, Test {
         targetContract(address(handler));
     }
 
-    function invariantQueuedTotalMatchesSum() public {
+    function invariantQueuedTotalMatchesSum() public view {
         uint256 sum;
         uint256 count = handler.participantCount();
         for (uint256 i = 0; i < count; i++) {
@@ -277,11 +307,11 @@ contract NavBNBInvariantTest is StdInvariant, Test {
         assertEq(nav.queuedTotalOwedBNB(), sum);
     }
 
-    function invariantNoUserOverClaims() public {
+    function invariantNoUserOverClaims() public view {
         assertFalse(handler.overClaim());
     }
 
-    function invariantSpentWithinCap() public {
+    function invariantSpentWithinCap() public view {
         uint256 count = handler.dayCount();
         for (uint256 i = 0; i < count; i++) {
             uint256 day = handler.dayList(i);
@@ -293,7 +323,7 @@ contract NavBNBInvariantTest is StdInvariant, Test {
         }
     }
 
-    function invariantNoUnexpectedOutflow() public {
+    function invariantNoUnexpectedOutflow() public view {
         assertFalse(handler.unexpectedOutflow());
     }
 }
