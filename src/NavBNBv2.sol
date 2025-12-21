@@ -16,8 +16,7 @@ contract NavBNBv2 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    mapping(address => uint256) public userOwedBNB;
-    uint256 public queuedTotalOwedBNB;
+    uint256 public totalLiabilitiesBNB;
     mapping(uint256 => uint256) public spentToday;
 
     uint256 public trackedAssetsBNB;
@@ -52,7 +51,6 @@ contract NavBNBv2 {
     error Slippage();
     error PausedError();
     error CapReached();
-    error NothingOwed();
     error Insolvent();
     error NotGuardian();
     error NotRecovery();
@@ -62,7 +60,6 @@ contract NavBNBv2 {
     error BurnBalance();
     error MintZero();
     error BnbSendFail();
-    error EmergencyRedeemInsufficient();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -170,7 +167,7 @@ contract NavBNBv2 {
         uint256 bnbQueued;
         uint256 day = _currentDay();
 
-        if (queuedTotalOwedBNB > 0) {
+        if (totalLiabilitiesBNB > 0) {
             bnbQueued = bnbAfterFee;
         } else {
             uint256 available = _availableForDay(day);
@@ -199,8 +196,16 @@ contract NavBNBv2 {
     }
 
     function claim() external nonReentrant {
-        if (userOwedBNB[msg.sender] == 0) {
-            revert NothingOwed();
+        _claim(type(uint256).max);
+    }
+
+    function claim(uint256 maxSteps) external nonReentrant {
+        _claim(maxSteps);
+    }
+
+    function _claim(uint256 maxSteps) internal {
+        if (totalLiabilitiesBNB == 0) {
+            return;
         }
         if (reserveBNB() == 0) {
             revert Insolvent();
@@ -214,14 +219,14 @@ contract NavBNBv2 {
         uint256 remaining = available;
         uint256 head = queueHead;
         uint256 totalPaid;
-        while (remaining > 0 && head < queue.length) {
+        uint256 steps;
+        while (remaining > 0 && head < queue.length && steps < maxSteps) {
             QueueEntry storage entry = queue[head];
             uint256 pay = entry.amount <= remaining ? entry.amount : remaining;
             entry.amount -= pay;
             remaining -= pay;
             totalPaid += pay;
-            queuedTotalOwedBNB -= pay;
-            userOwedBNB[entry.user] -= pay;
+            totalLiabilitiesBNB -= pay;
             trackedAssetsBNB -= pay;
             (bool success,) = entry.user.call{value: pay}("");
             if (!success) {
@@ -229,6 +234,9 @@ contract NavBNBv2 {
             }
             if (entry.amount == 0) {
                 head++;
+                steps++;
+            } else {
+                break;
             }
         }
         queueHead = head;
@@ -245,7 +253,6 @@ contract NavBNBv2 {
         if (reserveBNB() == 0) {
             revert Insolvent();
         }
-        uint256 owed = userOwedBNB[msg.sender];
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
         uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
@@ -256,19 +263,11 @@ contract NavBNBv2 {
         if (bnbOut < minBnbOut) {
             revert Slippage();
         }
-        if (owed > 0 && bnbOut < owed) {
-            revert EmergencyRedeemInsufficient();
-        }
-        if (bnbOut > reserveBNB() + owed) {
+        if (bnbOut > reserveBNB()) {
             revert Insolvent();
         }
 
         _burn(msg.sender, tokenAmount);
-
-        if (owed > 0) {
-            queuedTotalOwedBNB -= owed;
-            userOwedBNB[msg.sender] = 0;
-        }
 
         trackedAssetsBNB -= bnbOut;
         (bool success,) = msg.sender.call{value: bnbOut}("");
@@ -306,10 +305,10 @@ contract NavBNBv2 {
     }
 
     function reserveBNB() public view returns (uint256) {
-        if (trackedAssetsBNB <= queuedTotalOwedBNB) {
+        if (trackedAssetsBNB <= totalLiabilitiesBNB) {
             return 0;
         }
-        return trackedAssetsBNB - queuedTotalOwedBNB;
+        return trackedAssetsBNB - totalLiabilitiesBNB;
     }
 
     function untrackedSurplusBNB() public view returns (uint256) {
@@ -347,8 +346,16 @@ contract NavBNBv2 {
 
     function _enqueue(address user, uint256 amount) internal {
         queue.push(QueueEntry({user: user, amount: amount}));
-        userOwedBNB[user] += amount;
-        queuedTotalOwedBNB += amount;
+        totalLiabilitiesBNB += amount;
+    }
+
+    function queueLength() external view returns (uint256) {
+        return queue.length;
+    }
+
+    function getQueueEntry(uint256 index) external view returns (address user, uint256 amount) {
+        QueueEntry storage entry = queue[index];
+        return (entry.user, entry.amount);
     }
 
     function _transfer(address from, address to, uint256 amount) internal {

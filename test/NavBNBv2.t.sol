@@ -140,19 +140,13 @@ contract NavBNBv2Test is NoLogBound {
             nav.redeem(balance, 0);
         }
 
-        uint256 owed = nav.userOwedBNB(alice);
-        assertGt(owed, 0);
-
-        uint256 attackersOwedTotal;
-        for (uint256 i = 0; i < attackers; i++) {
-            attackersOwedTotal += nav.userOwedBNB(attackAddresses[i]);
-        }
-
         for (uint256 day = 0; day < 7; day++) {
-            uint256 aliceOwedBefore = nav.userOwedBNB(alice);
-            if (aliceOwedBefore == 0 && attackersOwedTotal == 0) {
+            uint256 totalLiabilitiesBefore = nav.totalLiabilitiesBNB();
+            if (totalLiabilitiesBefore == 0) {
                 break;
             }
+            uint256 head = nav.queueHead();
+            (address currentHeadUser, uint256 currentHeadRemaining) = nav.getQueueEntry(head);
             vm.warp(block.timestamp + 1 days);
             uint256 currentDay = block.timestamp / 1 days;
             uint256 cap = nav.capForDay(currentDay);
@@ -160,35 +154,42 @@ contract NavBNBv2Test is NoLogBound {
             uint256 capRemaining = cap > spent ? cap - spent : 0;
             uint256 reserve = nav.reserveBNB();
             uint256 available = capRemaining < reserve ? capRemaining : reserve;
-            uint256 balanceBefore = alice.balance;
-            uint256 attackersBalanceBefore;
+            uint256 headBalanceBefore = currentHeadUser.balance;
+            uint256 othersBalanceBefore = alice.balance;
             for (uint256 i = 0; i < attackers; i++) {
-                attackersBalanceBefore += attackAddresses[i].balance;
+                othersBalanceBefore += attackAddresses[i].balance;
+            }
+            if (currentHeadUser == alice) {
+                othersBalanceBefore -= alice.balance;
+            } else {
+                othersBalanceBefore -= currentHeadUser.balance;
             }
             vm.prank(alice);
             nav.claim();
-            uint256 balanceAfter = alice.balance;
-            uint256 attackersBalanceAfter;
+            uint256 headBalanceAfter = currentHeadUser.balance;
+            uint256 othersBalanceAfter = alice.balance;
             for (uint256 i = 0; i < attackers; i++) {
-                attackersBalanceAfter += attackAddresses[i].balance;
+                othersBalanceAfter += attackAddresses[i].balance;
             }
-            uint256 paidAlice = balanceAfter - balanceBefore;
-            uint256 paidAttackers = attackersBalanceAfter - attackersBalanceBefore;
-            uint256 expectedAlicePaid = available < aliceOwedBefore ? available : aliceOwedBefore;
-            assertEq(paidAlice, expectedAlicePaid);
-            if (paidAlice < aliceOwedBefore) {
-                assertEq(paidAttackers, 0);
+            if (currentHeadUser == alice) {
+                othersBalanceAfter -= alice.balance;
             } else {
-                uint256 remaining = available > paidAlice ? available - paidAlice : 0;
-                uint256 expectedAttackersPaid = remaining < attackersOwedTotal ? remaining : attackersOwedTotal;
-                assertEq(paidAttackers, expectedAttackersPaid);
+                othersBalanceAfter -= currentHeadUser.balance;
             }
-            if (paidAttackers > 0) {
-                attackersOwedTotal -= paidAttackers;
+            uint256 paidHead = headBalanceAfter - headBalanceBefore;
+            uint256 paidOthers = othersBalanceAfter - othersBalanceBefore;
+            uint256 expectedHeadPaid = available < currentHeadRemaining ? available : currentHeadRemaining;
+            assertEq(paidHead, expectedHeadPaid);
+            uint256 expectedOthersPaid;
+            if (currentHeadRemaining < available) {
+                uint256 remaining = available - currentHeadRemaining;
+                uint256 tailLiabilities = totalLiabilitiesBefore - currentHeadRemaining;
+                expectedOthersPaid = remaining < tailLiabilities ? remaining : tailLiabilities;
             }
+            assertEq(paidOthers, expectedOthersPaid);
         }
 
-        assertEq(nav.userOwedBNB(alice), 0);
+        assertEq(nav.totalLiabilitiesBNB(), 0);
     }
 
     function testCapBehaviorAndNextDayClaim() public {
@@ -200,8 +201,8 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
-        uint256 owed = nav.userOwedBNB(alice);
-        assertGt(owed, 0);
+        uint256 liabilities = nav.totalLiabilitiesBNB();
+        assertGt(liabilities, 0);
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -227,17 +228,19 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
-        uint256 owed = nav.userOwedBNB(alice);
-        uint256 queued = nav.queuedTotalOwedBNB();
+        uint256 liabilities = nav.totalLiabilitiesBNB();
         uint256 spent = nav.spentToday(block.timestamp / 1 days);
-        assertGt(owed, 0);
+        assertGt(liabilities, 0);
+        uint256 head = nav.queueHead();
+        (, uint256 headRemaining) = nav.getQueueEntry(head);
 
         vm.prank(alice);
         nav.claim();
 
-        assertEq(nav.userOwedBNB(alice), owed);
-        assertEq(nav.queuedTotalOwedBNB(), queued);
+        assertEq(nav.totalLiabilitiesBNB(), liabilities);
         assertEq(nav.spentToday(block.timestamp / 1 days), spent);
+        (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
+        assertEq(headRemainingAfter, headRemaining);
     }
 
     function testEmergencyRedeemWithoutQueue() public {
@@ -257,7 +260,7 @@ contract NavBNBv2Test is NoLogBound {
         assertApproxEqAbs(balanceAfter - balanceBefore, expected, 2);
     }
 
-    function testEmergencyRedeemClearsQueueWithMinimumBurn() public {
+    function testEmergencyRedeemDoesNotTouchQueue() public {
         vm.prank(alice);
         nav.deposit{value: 20 ether}(0);
 
@@ -266,20 +269,17 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
-        uint256 owed = nav.userOwedBNB(alice);
-        assertGt(owed, 0);
-
-        uint256 navBefore = nav.nav();
-        uint256 bps = nav.BPS();
-        uint256 feeBps = nav.EMERGENCY_FEE_BPS();
-        uint256 numerator = (owed + 1) * 1e18 * bps;
-        uint256 denominator = navBefore * (bps - feeBps);
-        uint256 minTokens = (numerator + denominator - 1) / denominator;
+        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
+        uint256 head = nav.queueHead();
+        (, uint256 headRemainingBefore) = nav.getQueueEntry(head);
+        assertGt(liabilitiesBefore, 0);
 
         vm.prank(alice);
-        nav.emergencyRedeem(minTokens, 0);
+        nav.emergencyRedeem(nav.balanceOf(alice) / 4, 0);
 
-        assertEq(nav.userOwedBNB(alice), 0);
+        assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
+        (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
+        assertEq(headRemainingAfter, headRemainingBefore);
     }
 
     function testEmergencyRedeemRejectsDustQueueClear() public {
@@ -291,9 +291,16 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
+        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
+        uint256 head = nav.queueHead();
+        (, uint256 headRemainingBefore) = nav.getQueueEntry(head);
+
         vm.prank(alice);
-        vm.expectRevert(NavBNBv2.EmergencyRedeemInsufficient.selector);
         nav.emergencyRedeem(1, 0);
+
+        assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
+        (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
+        assertEq(headRemainingAfter, headRemainingBefore);
     }
 
     function testPauseBlocksDepositAndRedeem() public {
@@ -354,15 +361,15 @@ contract NavBNBv2HandlerTest is NoLogBound {
 
     function claim(uint256 userSeed) external {
         address user = users[userSeed % users.length];
-        uint256 owed = nav.userOwedBNB(user);
-        if (owed == 0) {
+        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
+        if (liabilitiesBefore == 0) {
             return;
         }
         uint256 beforeBalance = user.balance;
         vm.prank(user);
-        nav.claim();
+        nav.claim(1);
         uint256 afterBalance = user.balance;
-        if (afterBalance - beforeBalance > owed) {
+        if (afterBalance - beforeBalance > liabilitiesBefore) {
             overClaim = true;
         }
         _trackParticipant(user);
@@ -400,12 +407,13 @@ contract NavBNBv2InvariantTest is StdInvariant, Test {
 
     function invariantQueuedTotalMatchesSum() public view {
         uint256 sum;
-        uint256 count = handler.participantCount();
-        for (uint256 i = 0; i < count; i++) {
-            address user = handler.participants(i);
-            sum += nav.userOwedBNB(user);
+        uint256 head = nav.queueHead();
+        uint256 len = nav.queueLength();
+        for (uint256 i = head; i < len; i++) {
+            (, uint256 amount) = nav.getQueueEntry(i);
+            sum += amount;
         }
-        assertEq(nav.queuedTotalOwedBNB(), sum);
+        assertEq(nav.totalLiabilitiesBNB(), sum);
     }
 
     function invariantNoUserOverClaims() public view {
