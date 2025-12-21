@@ -216,15 +216,14 @@ contract NavBNBv2 {
             emit CapExhausted(day, spentToday[day], _dayCap(day));
             return;
         }
-        uint256 remaining = available;
         uint256 head = queueHead;
         uint256 totalPaid;
         uint256 steps;
-        while (remaining > 0 && head < queue.length && steps < maxSteps) {
+        while (available > 0 && head < queue.length && steps < maxSteps) {
             QueueEntry storage entry = queue[head];
-            uint256 pay = entry.amount <= remaining ? entry.amount : remaining;
+            uint256 pay = entry.amount <= available ? entry.amount : available;
             entry.amount -= pay;
-            remaining -= pay;
+            available -= pay;
             totalPaid += pay;
             totalLiabilitiesBNB -= pay;
             trackedAssetsBNB -= pay;

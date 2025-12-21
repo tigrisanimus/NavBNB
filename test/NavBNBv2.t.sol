@@ -180,13 +180,19 @@ contract NavBNBv2Test is NoLogBound {
             uint256 paidOthers = othersBalanceAfter - othersBalanceBefore;
             uint256 expectedHeadPaid = available < currentHeadRemaining ? available : currentHeadRemaining;
             assertEq(paidHead, expectedHeadPaid);
-            uint256 expectedOthersPaid;
-            if (currentHeadRemaining < available) {
-                uint256 remaining = available - currentHeadRemaining;
-                uint256 tailLiabilities = totalLiabilitiesBefore - currentHeadRemaining;
-                expectedOthersPaid = remaining < tailLiabilities ? remaining : tailLiabilities;
+            assertEq(paidOthers, 0);
+            if (expectedHeadPaid == currentHeadRemaining) {
+                uint256 headAfter = nav.queueHead();
+                (address nextHeadUser, ) = nav.getQueueEntry(headAfter);
+                if (headAfter < nav.queueLength()) {
+                    uint256 nextHeadBalanceBefore = nextHeadUser.balance;
+                    vm.prank(alice);
+                    nav.claim();
+                    uint256 nextHeadBalanceAfter = nextHeadUser.balance;
+                    uint256 nextHeadPaid = nextHeadBalanceAfter - nextHeadBalanceBefore;
+                    assertGt(nextHeadPaid, 0);
+                }
             }
-            assertEq(paidOthers, expectedOthersPaid);
         }
 
         assertEq(nav.totalLiabilitiesBNB(), 0);
