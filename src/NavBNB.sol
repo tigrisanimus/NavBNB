@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 contract NavBNB {
     string public constant name = "NavBNB";
-    string public constant symbol = "NavBNB";
+    string public constant symbol = "nBNB";
     uint8 public constant decimals = 18;
 
     uint256 public constant BPS = 10_000;
@@ -27,6 +27,8 @@ contract NavBNB {
     event Deposit(address indexed account, uint256 bnbIn, uint256 minted);
     event Redeem(address indexed account, uint256 tokenAmount, uint256 bnbPaid, uint256 bnbQueued);
     event Claim(address indexed account, uint256 bnbPaid);
+
+    error DepositsPausedNoReserve();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -64,6 +66,9 @@ contract NavBNB {
         uint256 valueAfterFee = msg.value - fee;
         uint256 preBalance = address(this).balance - msg.value;
         uint256 preReserve = preBalance - queuedTotalOwedBNB;
+        if (totalSupply > 0 && preReserve == 0) {
+            revert DepositsPausedNoReserve();
+        }
         uint256 navBefore = totalSupply == 0 ? 1e18 : (preReserve * 1e18) / totalSupply;
         uint256 minted = (valueAfterFee * 1e18) / navBefore;
         _mint(msg.sender, minted);
