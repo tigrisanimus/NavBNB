@@ -34,12 +34,6 @@ abstract contract NoLogBound is Test {
 }
 
 contract NavBNBTest is NoLogBound {
-    uint256 internal constant BPS = 10_000;
-    uint256 internal constant MINT_FEE_BPS = 25;
-    uint256 internal constant REDEEM_FEE_BPS = 25;
-    uint256 internal constant CAP_BPS = 100;
-    uint256 internal constant EMERGENCY_FEE_BPS = 1_000;
-
     NavBNB internal nav;
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
@@ -55,7 +49,8 @@ contract NavBNBTest is NoLogBound {
     function testDepositMintsWithFee() public {
         uint256 amount = 10 ether;
         uint256 bps = nav.BPS();
-        uint256 expectedMint = (amount * (bps - MINT_FEE_BPS)) / bps;
+        uint256 mintFeeBps = nav.MINT_FEE_BPS();
+        uint256 expectedMint = (amount * (bps - mintFeeBps)) / bps;
 
         vm.prank(alice);
         nav.deposit{value: amount}();
@@ -74,7 +69,8 @@ contract NavBNBTest is NoLogBound {
 
         assertEq(address(nav).balance, depositAmount);
         uint256 bps = nav.BPS();
-        uint256 expectedMint = (depositAmount * (bps - MINT_FEE_BPS)) / bps;
+        uint256 mintFeeBps = nav.MINT_FEE_BPS();
+        uint256 expectedMint = (depositAmount * (bps - mintFeeBps)) / bps;
         uint256 expectedNav = (depositAmount * 1e18) / expectedMint;
         assertApproxEqAbs(nav.nav(), expectedNav, 5);
     }
@@ -127,7 +123,8 @@ contract NavBNBTest is NoLogBound {
         uint256 bps = nav.BPS();
         uint256 feeBps = nav.REDEEM_FEE_BPS();
         uint256 expectedAfterFee = (desiredBnb * (bps - feeBps)) / bps;
-        uint256 expectedCap = (nav.reserveBNB() * CAP_BPS) / bps;
+        uint256 capBps = nav.CAP_BPS();
+        uint256 expectedCap = (nav.reserveBNB() * capBps) / bps;
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -195,8 +192,9 @@ contract NavBNBTest is NoLogBound {
         uint256 day = block.timestamp / 1 days;
 
         uint256 bps = nav.BPS();
-        uint256 totalAssetsCap = (address(nav).balance * CAP_BPS) / bps;
-        uint256 reserveCap = (nav.reserveBNB() * CAP_BPS) / bps;
+        uint256 capBps = nav.CAP_BPS();
+        uint256 totalAssetsCap = (address(nav).balance * capBps) / bps;
+        uint256 reserveCap = (nav.reserveBNB() * capBps) / bps;
         uint256 cap = nav.capForDay(day);
 
         assertApproxEqAbs(cap, totalAssetsCap, 2);
@@ -211,7 +209,8 @@ contract NavBNBTest is NoLogBound {
         uint256 tokenAmount = nav.balanceOf(alice) / 2;
         uint256 bnbOwed = (tokenAmount * nav.nav()) / 1e18;
         uint256 bps = nav.BPS();
-        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / bps;
+        uint256 emergencyFeeBps = nav.EMERGENCY_FEE_BPS();
+        uint256 fee = (bnbOwed * emergencyFeeBps) / bps;
         uint256 expectedPayout = bnbOwed - fee;
 
         uint256 balanceBefore = alice.balance;
