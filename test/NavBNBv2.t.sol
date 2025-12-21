@@ -143,16 +143,48 @@ contract NavBNBv2Test is NoLogBound {
         uint256 owed = nav.userOwedBNB(alice);
         assertGt(owed, 0);
 
-        for (uint256 day = 0; day < 5; day++) {
-            if (nav.userOwedBNB(alice) == 0) {
+        uint256 attackersOwedTotal;
+        for (uint256 i = 0; i < attackers; i++) {
+            attackersOwedTotal += nav.userOwedBNB(attackAddresses[i]);
+        }
+
+        for (uint256 day = 0; day < 7; day++) {
+            uint256 aliceOwedBefore = nav.userOwedBNB(alice);
+            if (aliceOwedBefore == 0 && attackersOwedTotal == 0) {
                 break;
             }
             vm.warp(block.timestamp + 1 days);
+            uint256 currentDay = block.timestamp / 1 days;
+            uint256 cap = nav.capForDay(currentDay);
+            uint256 spent = nav.spentToday(currentDay);
+            uint256 capRemaining = cap > spent ? cap - spent : 0;
+            uint256 reserve = nav.reserveBNB();
+            uint256 available = capRemaining < reserve ? capRemaining : reserve;
             uint256 balanceBefore = alice.balance;
+            uint256 attackersBalanceBefore;
+            for (uint256 i = 0; i < attackers; i++) {
+                attackersBalanceBefore += attackAddresses[i].balance;
+            }
             vm.prank(alice);
             nav.claim();
             uint256 balanceAfter = alice.balance;
-            assertGe(balanceAfter - balanceBefore, 0);
+            uint256 attackersBalanceAfter;
+            for (uint256 i = 0; i < attackers; i++) {
+                attackersBalanceAfter += attackAddresses[i].balance;
+            }
+            uint256 paidAlice = balanceAfter - balanceBefore;
+            uint256 paidAttackers = attackersBalanceAfter - attackersBalanceBefore;
+            uint256 expectedAlicePaid = available < aliceOwedBefore ? available : aliceOwedBefore;
+            assertEq(paidAlice, expectedAlicePaid);
+            uint256 expectedAttackersPaid;
+            if (available > aliceOwedBefore) {
+                uint256 remaining = available - aliceOwedBefore;
+                expectedAttackersPaid = remaining < attackersOwedTotal ? remaining : attackersOwedTotal;
+            }
+            assertEq(paidAttackers, expectedAttackersPaid);
+            if (paidAttackers > 0) {
+                attackersOwedTotal -= paidAttackers;
+            }
         }
 
         assertEq(nav.userOwedBNB(alice), 0);
