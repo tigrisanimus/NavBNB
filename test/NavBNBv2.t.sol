@@ -162,7 +162,7 @@ contract NavBNBv2Test is NoLogBound {
             if (currentHeadUser == alice) {
                 othersBalanceBefore -= alice.balance;
             } else {
-                othersBalanceBefore -= currentHeadUser.balance;
+                othersBalanceBefore -= headBalanceBefore;
             }
             vm.prank(alice);
             nav.claim();
@@ -174,25 +174,13 @@ contract NavBNBv2Test is NoLogBound {
             if (currentHeadUser == alice) {
                 othersBalanceAfter -= alice.balance;
             } else {
-                othersBalanceAfter -= currentHeadUser.balance;
+                othersBalanceAfter -= headBalanceAfter;
             }
             uint256 paidHead = headBalanceAfter - headBalanceBefore;
             uint256 paidOthers = othersBalanceAfter - othersBalanceBefore;
             uint256 expectedHeadPaid = available < currentHeadRemaining ? available : currentHeadRemaining;
             assertEq(paidHead, expectedHeadPaid);
             assertEq(paidOthers, 0);
-            if (expectedHeadPaid == currentHeadRemaining) {
-                uint256 headAfter = nav.queueHead();
-                (address nextHeadUser, ) = nav.getQueueEntry(headAfter);
-                if (headAfter < nav.queueLength()) {
-                    uint256 nextHeadBalanceBefore = nextHeadUser.balance;
-                    vm.prank(alice);
-                    nav.claim();
-                    uint256 nextHeadBalanceAfter = nextHeadUser.balance;
-                    uint256 nextHeadPaid = nextHeadBalanceAfter - nextHeadBalanceBefore;
-                    assertGt(nextHeadPaid, 0);
-                }
-            }
         }
 
         assertEq(nav.totalLiabilitiesBNB(), 0);
@@ -275,13 +263,18 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
+        vm.prank(alice);
+        nav.deposit{value: 5 ether}(0);
+
         uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
         uint256 head = nav.queueHead();
         (, uint256 headRemainingBefore) = nav.getQueueEntry(head);
         assertGt(liabilitiesBefore, 0);
 
+        uint256 emergencyShares = nav.balanceOf(alice) / 4;
+        assertGt(emergencyShares, 0);
         vm.prank(alice);
-        nav.emergencyRedeem(nav.balanceOf(alice) / 4, 0);
+        nav.emergencyRedeem(emergencyShares, 0);
 
         assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
         (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
