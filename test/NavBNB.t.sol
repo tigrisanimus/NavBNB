@@ -164,7 +164,7 @@ contract NavBNBHandlerTest is Test {
     NavBNB internal nav;
     address[] public users;
     address[] public participants;
-    uint256[] public days;
+    uint256[] public dayList;
     mapping(address => bool) internal isParticipant;
     mapping(uint256 => bool) internal daySeen;
 
@@ -232,14 +232,14 @@ contract NavBNBHandlerTest is Test {
     }
 
     function dayCount() external view returns (uint256) {
-        return days.length;
+        return dayList.length;
     }
 
     function _trackDay() internal {
         uint256 day = block.timestamp / 1 days;
         if (!daySeen[day]) {
             daySeen[day] = true;
-            days.push(day);
+            dayList.push(day);
         }
     }
 }
@@ -279,7 +279,7 @@ contract NavBNBInvariantTest is StdInvariant, Test {
     function invariantSpentWithinCap() public {
         uint256 count = handler.dayCount();
         for (uint256 i = 0; i < count; i++) {
-            uint256 day = handler.days(i);
+            uint256 day = handler.dayList(i);
             uint256 cap = nav.capForDay(day);
             if (cap == 0) {
                 continue;
