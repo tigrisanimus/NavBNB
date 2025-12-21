@@ -63,6 +63,12 @@ contract NavBNBTest is NoLogBound {
         assertGt(nav.nav(), 1e18);
     }
 
+    function testMetadata() public view {
+        assertEq(nav.name(), "NavBNB");
+        assertEq(nav.symbol(), "nBNB");
+        assertEq(nav.decimals(), 18);
+    }
+
     function testRedeemWithinCapPaysImmediately() public {
         uint256 depositAmount = 100 ether;
         vm.prank(alice);
@@ -100,6 +106,19 @@ contract NavBNBTest is NoLogBound {
         assertApproxEqAbs(balanceAfter - balanceBefore, expectedCap, 2);
         assertApproxEqAbs(nav.userOwedBNB(alice), expectedAfterFee - expectedCap, 2);
         assertApproxEqAbs(nav.queuedTotalOwedBNB(), expectedAfterFee - expectedCap, 2);
+    }
+
+    function testDepositRevertsWhenFullyQueued() public {
+        uint256 depositAmount = 100 ether;
+        vm.prank(alice);
+        nav.deposit{value: depositAmount}();
+
+        vm.store(address(nav), bytes32(uint256(4)), bytes32(address(nav).balance));
+        assertEq(nav.reserveBNB(), 0);
+
+        vm.prank(bob);
+        vm.expectRevert(NavBNB.DepositsPausedNoReserve.selector);
+        nav.deposit{value: 1 ether}();
     }
 
     function testClaimPaysProRata() public {
