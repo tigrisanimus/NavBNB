@@ -93,6 +93,13 @@ contract NavBNB {
 
         _burn(msg.sender, tokenAmount);
 
+        if (queuedTotalOwedBNB > 0) {
+            userOwedBNB[msg.sender] += bnbAfterFee;
+            queuedTotalOwedBNB += bnbAfterFee;
+            emit Redeem(msg.sender, tokenAmount, 0, bnbAfterFee);
+            return;
+        }
+
         uint256 day = _currentDay();
         uint256 cap = _dayCap(day);
         uint256 spent = spentToday[day];
@@ -220,17 +227,18 @@ contract NavBNB {
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
         uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
-        uint256 bnbAfterFee = bnbOwed - fee;
-        if (reserveBNB() < bnbAfterFee) {
+        uint256 bnbOut = bnbOwed - fee;
+        require(bnbOut > 0, "ROUNDING");
+        if (reserveBNB() < bnbOut) {
             revert InsufficientLiquidity();
         }
 
         _burn(msg.sender, tokenAmount);
 
-        (bool success,) = msg.sender.call{value: bnbAfterFee}("");
+        (bool success,) = msg.sender.call{value: bnbOut}("");
         require(success, "BNB_SEND_FAIL");
 
-        emit EmergencyRedeem(msg.sender, tokenAmount, bnbAfterFee, fee);
+        emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
     }
 
     function _currentDay() internal view returns (uint256) {
