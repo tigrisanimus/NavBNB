@@ -176,12 +176,13 @@ contract NavBNBv2Test is NoLogBound {
             uint256 paidAttackers = attackersBalanceAfter - attackersBalanceBefore;
             uint256 expectedAlicePaid = available < aliceOwedBefore ? available : aliceOwedBefore;
             assertEq(paidAlice, expectedAlicePaid);
-            uint256 expectedAttackersPaid;
-            if (available > aliceOwedBefore) {
-                uint256 remaining = available - aliceOwedBefore;
-                expectedAttackersPaid = remaining < attackersOwedTotal ? remaining : attackersOwedTotal;
+            if (paidAlice < aliceOwedBefore) {
+                assertEq(paidAttackers, 0);
+            } else {
+                uint256 remaining = available > paidAlice ? available - paidAlice : 0;
+                uint256 expectedAttackersPaid = remaining < attackersOwedTotal ? remaining : attackersOwedTotal;
+                assertEq(paidAttackers, expectedAttackersPaid);
             }
-            assertEq(paidAttackers, expectedAttackersPaid);
             if (paidAttackers > 0) {
                 attackersOwedTotal -= paidAttackers;
             }
