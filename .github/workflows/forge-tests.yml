@@ -17,11 +17,16 @@ jobs:
         run: |
           set -euxo pipefail
           curl -L https://foundry.paradigm.xyz | bash
-          echo "$HOME/.foundry/bin" >> $GITHUB_PATH
           "$HOME/.foundry/bin/foundryup"
-          forge --version
+          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+          "$HOME/.foundry/bin/forge" --version
 
       - name: Run tests
+        shell: bash
         run: |
+          set -euxo pipefail
+          export PATH="$HOME/.foundry/bin:$PATH"
+          which forge
+          forge --version
           forge test -vvv
           forge test -vvv --fuzz-runs 5000
