@@ -157,6 +157,10 @@ contract NavBNBv2Test is NoLogBound {
             if (available > totalLiabilitiesBefore) {
                 available = totalLiabilitiesBefore;
             }
+            uint256 trackedAssets = nav.trackedAssetsBNB();
+            if (available > trackedAssets) {
+                available = trackedAssets;
+            }
             uint256 contractBalanceBefore = address(nav).balance;
             uint256[] memory remainingBefore = new uint256[](queueLen);
             for (uint256 i = 0; i < queueLen; i++) {
