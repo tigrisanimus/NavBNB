@@ -12,13 +12,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
+      - name: Install Foundry (forge)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L https://foundry.paradigm.xyz | bash
+          echo "$HOME/.foundry/bin" >> $GITHUB_PATH
+          "$HOME/.foundry/bin/foundryup"
+          forge --version
 
       - name: Run tests
         run: |
-          forge --version
           forge test -vvv
           forge test -vvv --fuzz-runs 5000
