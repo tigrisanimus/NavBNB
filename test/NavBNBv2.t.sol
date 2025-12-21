@@ -150,8 +150,8 @@ contract NavBNBv2Test is NoLogBound {
             uint256 cap = nav.capForDay(currentDay);
             uint256 spent = nav.spentToday(currentDay);
             uint256 capRemaining = cap > spent ? cap - spent : 0;
-            uint256 reserve = nav.reserveBNB();
-            uint256 available = capRemaining < reserve ? capRemaining : reserve;
+            uint256 available = capRemaining < totalLiabilitiesBefore ? capRemaining : totalLiabilitiesBefore;
+            available = available < nav.trackedAssetsBNB() ? available : nav.trackedAssetsBNB();
             uint256 contractBalanceBefore = address(nav).balance;
             uint256[] memory remainingBefore = new uint256[](queueLen);
             for (uint256 i = 0; i < queueLen; i++) {
