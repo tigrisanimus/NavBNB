@@ -146,7 +146,8 @@ contract NavBNBv2Test is NoLogBound {
                 break;
             }
             uint256 head = nav.queueHead();
-            (address currentHeadUser, uint256 currentHeadRemaining) = nav.getQueueEntry(head);
+            uint256 queueLen = nav.queueLength();
+            uint256 availableBefore;
             vm.warp(block.timestamp + 1 days);
             uint256 currentDay = block.timestamp / 1 days;
             uint256 cap = nav.capForDay(currentDay);
@@ -154,33 +155,62 @@ contract NavBNBv2Test is NoLogBound {
             uint256 capRemaining = cap > spent ? cap - spent : 0;
             uint256 reserve = nav.reserveBNB();
             uint256 available = capRemaining < reserve ? capRemaining : reserve;
-            uint256 headBalanceBefore = currentHeadUser.balance;
-            uint256 othersBalanceBefore = alice.balance;
+            availableBefore = available;
+            uint256[] memory balancesBefore = new uint256[](attackers + 1);
+            balancesBefore[0] = alice.balance;
             for (uint256 i = 0; i < attackers; i++) {
-                othersBalanceBefore += attackAddresses[i].balance;
-            }
-            if (currentHeadUser == alice) {
-                othersBalanceBefore -= alice.balance;
-            } else {
-                othersBalanceBefore -= headBalanceBefore;
+                balancesBefore[i + 1] = attackAddresses[i].balance;
             }
             vm.prank(alice);
             nav.claim();
-            uint256 headBalanceAfter = currentHeadUser.balance;
-            uint256 othersBalanceAfter = alice.balance;
+            uint256[] memory balancesAfter = new uint256[](attackers + 1);
+            balancesAfter[0] = alice.balance;
             for (uint256 i = 0; i < attackers; i++) {
-                othersBalanceAfter += attackAddresses[i].balance;
+                balancesAfter[i + 1] = attackAddresses[i].balance;
             }
-            if (currentHeadUser == alice) {
-                othersBalanceAfter -= alice.balance;
-            } else {
-                othersBalanceAfter -= headBalanceAfter;
+
+            uint256 expectedPaidTotal;
+            uint256 remaining = availableBefore;
+            uint256 processingIndex = head;
+            uint256 lastPaidIndex = head;
+            while (remaining > 0 && processingIndex < queueLen) {
+                (address user, uint256 amount) = nav.getQueueEntry(processingIndex);
+                uint256 pay = amount <= remaining ? amount : remaining;
+                expectedPaidTotal += pay;
+                remaining -= pay;
+                lastPaidIndex = processingIndex;
+                if (pay < amount) {
+                    break;
+                }
+                processingIndex++;
             }
-            uint256 paidHead = headBalanceAfter - headBalanceBefore;
-            uint256 paidOthers = othersBalanceAfter - othersBalanceBefore;
-            uint256 expectedHeadPaid = available < currentHeadRemaining ? available : currentHeadRemaining;
-            assertEq(paidHead, expectedHeadPaid);
-            assertEq(paidOthers, 0);
+
+            uint256 paidTotal;
+            for (uint256 i = 0; i < attackers + 1; i++) {
+                paidTotal += balancesAfter[i] - balancesBefore[i];
+            }
+            assertEq(paidTotal, expectedPaidTotal);
+
+            if (lastPaidIndex + 1 < queueLen) {
+                for (uint256 i = lastPaidIndex + 1; i < queueLen; i++) {
+                    (address userAfter, ) = nav.getQueueEntry(i);
+                    uint256 beforeBalance;
+                    uint256 afterBalance;
+                    if (userAfter == alice) {
+                        beforeBalance = balancesBefore[0];
+                        afterBalance = balancesAfter[0];
+                    } else {
+                        for (uint256 j = 0; j < attackers; j++) {
+                            if (userAfter == attackAddresses[j]) {
+                                beforeBalance = balancesBefore[j + 1];
+                                afterBalance = balancesAfter[j + 1];
+                                break;
+                            }
+                        }
+                    }
+                    assertEq(afterBalance - beforeBalance, 0);
+                }
+            }
         }
 
         assertEq(nav.totalLiabilitiesBNB(), 0);
@@ -272,6 +302,7 @@ contract NavBNBv2Test is NoLogBound {
         assertGt(liabilitiesBefore, 0);
 
         uint256 emergencyShares = nav.balanceOf(alice) / 4;
+        assertGe(nav.balanceOf(alice), emergencyShares);
         assertGt(emergencyShares, 0);
         vm.prank(alice);
         nav.emergencyRedeem(emergencyShares, 0);
