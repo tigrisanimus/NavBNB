@@ -189,22 +189,20 @@ contract NavBNB {
 
     function emergencyRedeem(uint256 tokenAmount) external nonReentrant {
         require(tokenAmount > 0, "ZERO_REDEEM");
-        if (queuedTotalOwedBNB != 0) {
-            revert QueueExists();
+        uint256 owed = userOwedBNB[msg.sender];
+        if (owed > 0) {
+            queuedTotalOwedBNB -= owed;
+            userOwedBNB[msg.sender] = 0;
         }
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
         uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
         uint256 bnbAfterFee = bnbOwed - fee;
-        if (address(this).balance < bnbAfterFee) {
+        if (reserveBNB() < bnbAfterFee) {
             revert InsufficientLiquidity();
         }
 
         _burn(msg.sender, tokenAmount);
-
-        uint256 day = _currentDay();
-        _dayCap(day);
-        spentToday[day] += bnbAfterFee;
 
         (bool success,) = msg.sender.call{value: bnbAfterFee}("");
         require(success, "BNB_SEND_FAIL");

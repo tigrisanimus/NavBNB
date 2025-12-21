@@ -151,7 +151,7 @@ contract NavBNBTest is NoLogBound {
         assertEq(nav.balanceOf(alice), nav.totalSupply());
     }
 
-    function testEmergencyRedeemRevertsWhenQueueExists() public {
+    function testEmergencyRedeemClearsQueuedRedemption() public {
         uint256 depositAmount = 10 ether;
         vm.prank(alice);
         nav.deposit{value: depositAmount}();
@@ -161,11 +161,18 @@ contract NavBNBTest is NoLogBound {
         vm.prank(alice);
         nav.redeem(tokenAmount);
 
-        assertGt(nav.queuedTotalOwedBNB(), 0);
+        uint256 owedBefore = nav.userOwedBNB(alice);
+        uint256 queuedBefore = nav.queuedTotalOwedBNB();
+        assertGt(owedBefore, 0);
 
+        uint256 emergencyTokens = nav.balanceOf(alice) / 4;
         vm.prank(alice);
-        vm.expectRevert(NavBNB.QueueExists.selector);
-        nav.emergencyRedeem(1);
+        nav.emergencyRedeem(emergencyTokens);
+
+        assertEq(nav.userOwedBNB(alice), 0);
+        assertEq(nav.queuedTotalOwedBNB(), queuedBefore - owedBefore);
+        assertEq(nav.queuedTotalOwedBNB(), nav.userOwedBNB(alice));
+        assertEq(nav.reserveBNB(), address(nav).balance - nav.queuedTotalOwedBNB());
     }
 
     function testDepositRevertsWhenFullyQueued() public {
