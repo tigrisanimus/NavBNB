@@ -6,13 +6,17 @@ import "forge-std/StdInvariant.sol";
 import "src/NavBNB.sol";
 
 abstract contract NoLogBound is Test {
-    uint256 internal constant UINT256_MAX = type(uint256).max;
-
     function bound(uint256 x, uint256 min, uint256 max) internal pure override returns (uint256 result) {
         return _bound(x, min, max);
     }
 
-    function _bound(uint256 x, uint256 min, uint256 max) internal pure returns (uint256 result) {
+    function _bound(uint256 x, uint256 min, uint256 max)
+        internal
+        pure
+        virtual
+        override
+        returns (uint256 result)
+    {
         require(min <= max, "StdUtils bound(uint256,uint256,uint256): Max is less than min.");
         if (x >= min && x <= max) return x;
 
