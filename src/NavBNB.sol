@@ -32,6 +32,7 @@ contract NavBNB {
 
     error DepositsPausedNoReserve();
     error QueueExists();
+    error SupplyNotZero();
     error InsufficientLiquidity();
 
     modifier nonReentrant() {
@@ -69,6 +70,10 @@ contract NavBNB {
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
         uint256 valueAfterFee = msg.value - fee;
         uint256 preBalance = address(this).balance - msg.value;
+        if (totalSupply == 0 && preBalance > 0) {
+            _sweepOrphanedReserve(preBalance);
+            preBalance = address(this).balance - msg.value;
+        }
         uint256 preReserve = preBalance - queuedTotalOwedBNB;
         if (totalSupply > 0 && preReserve == 0) {
             revert DepositsPausedNoReserve();
@@ -162,6 +167,24 @@ contract NavBNB {
             return 1e18;
         }
         return (reserveBNB() * 1e18) / totalSupply;
+    }
+
+    function sweepOrphanedReserve() public {
+        _sweepOrphanedReserve(address(this).balance);
+    }
+
+    function _sweepOrphanedReserve(uint256 amount) internal {
+        if (totalSupply != 0) {
+            revert SupplyNotZero();
+        }
+        if (queuedTotalOwedBNB != 0) {
+            revert QueueExists();
+        }
+        if (amount == 0) {
+            return;
+        }
+        (bool success,) = address(0).call{value: amount}("");
+        require(success, "SWEEP_FAIL");
     }
 
     function totalAssetsBNB() public view returns (uint256) {
