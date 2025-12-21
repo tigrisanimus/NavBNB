@@ -334,6 +334,14 @@ contract NavBNBv2 {
         return cap > spent ? cap - spent : 0;
     }
 
+    function capRemainingForDay(uint256 day) external view returns (uint256) {
+        return _capRemaining(day);
+    }
+
+    function capRemainingToday() external view returns (uint256) {
+        return _capRemaining(_currentDay());
+    }
+
     function _availableForDay(uint256 day) internal view returns (uint256) {
         uint256 capRemaining = _capRemaining(day);
         uint256 available = capRemaining < totalLiabilitiesBNB ? capRemaining : totalLiabilitiesBNB;
