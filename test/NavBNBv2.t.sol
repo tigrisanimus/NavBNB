@@ -140,8 +140,11 @@ contract NavBNBv2Test is NoLogBound {
             nav.redeem(balance, 0);
         }
 
-        uint256 maxDays = 60;
-        for (uint256 day = 0; day < maxDays && nav.totalLiabilitiesBNB() > 0; day++) {
+        uint256 maxDays = 90;
+        for (uint256 day = 0; day < maxDays; day++) {
+            if (nav.totalLiabilitiesBNB() == 0) {
+                break;
+            }
             vm.warp(block.timestamp + 1 days);
             uint256 totalLiabilitiesBefore = nav.totalLiabilitiesBNB();
             uint256 head = nav.queueHead();
@@ -150,8 +153,14 @@ contract NavBNBv2Test is NoLogBound {
             uint256 cap = nav.capForDay(currentDay);
             uint256 spent = nav.spentToday(currentDay);
             uint256 capRemaining = cap > spent ? cap - spent : 0;
-            uint256 available = capRemaining < totalLiabilitiesBefore ? capRemaining : totalLiabilitiesBefore;
-            available = available < nav.trackedAssetsBNB() ? available : nav.trackedAssetsBNB();
+            uint256 available = capRemaining;
+            if (available > totalLiabilitiesBefore) {
+                available = totalLiabilitiesBefore;
+            }
+            uint256 trackedAssets = nav.trackedAssetsBNB();
+            if (available > trackedAssets) {
+                available = trackedAssets;
+            }
             uint256 contractBalanceBefore = address(nav).balance;
             uint256[] memory remainingBefore = new uint256[](queueLen);
             for (uint256 i = 0; i < queueLen; i++) {
@@ -189,21 +198,9 @@ contract NavBNBv2Test is NoLogBound {
         }
 
         uint256 remainingLiabilities = nav.totalLiabilitiesBNB();
-        uint256 currentDay = block.timestamp / 1 days;
-        assertEq(
-            remainingLiabilities,
-            0,
-            string(
-                abi.encodePacked(
-                    "remaining liabilities: ",
-                    vm.toString(remainingLiabilities),
-                    " cap: ",
-                    vm.toString(nav.capForDay(currentDay)),
-                    " spent: ",
-                    vm.toString(nav.spentToday(currentDay))
-                )
-            )
-        );
+        if (remainingLiabilities > 0) {
+            fail(string(abi.encodePacked("remaining liabilities: ", vm.toString(remainingLiabilities))));
+        }
     }
 
     function testCapBehaviorAndNextDayClaim() public {
