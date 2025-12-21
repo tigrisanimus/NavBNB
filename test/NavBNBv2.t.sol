@@ -149,10 +149,7 @@ contract NavBNBv2Test is NoLogBound {
             uint256 totalLiabilitiesBefore = nav.totalLiabilitiesBNB();
             uint256 head = nav.queueHead();
             uint256 queueLen = nav.queueLength();
-            uint256 currentDay = block.timestamp / 1 days;
-            uint256 cap = nav.capForDay(currentDay);
-            uint256 spent = nav.spentToday(currentDay);
-            uint256 capRemaining = cap > spent ? cap - spent : 0;
+            uint256 capRemaining = nav.capRemainingToday();
             uint256 available = capRemaining;
             if (available > totalLiabilitiesBefore) {
                 available = totalLiabilitiesBefore;
