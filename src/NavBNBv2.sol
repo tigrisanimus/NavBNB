@@ -324,7 +324,7 @@ contract NavBNBv2 {
     }
 
     function _dayCap(uint256 day) internal view returns (uint256) {
-        uint256 assetsForCap = trackedAssetsBNB + spentToday[day];
+        uint256 assetsForCap = trackedAssetsBNB + totalLiabilitiesBNB + spentToday[day];
         return (assetsForCap * CAP_BPS) / BPS;
     }
 
