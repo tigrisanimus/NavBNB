@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "forge-std/StdInvariant.sol";
-import "../src/NavBNB.sol";
+import "src/NavBNB.sol";
 
 contract NavBNBTest is Test {
     NavBNB internal nav;
@@ -160,7 +160,7 @@ contract NavBNBTest is Test {
     }
 }
 
-contract NavBNBHandler is Test {
+contract NavBNBHandlerTest is Test {
     NavBNB internal nav;
     address[] public users;
     address[] public participants;
@@ -244,9 +244,9 @@ contract NavBNBHandler is Test {
     }
 }
 
-contract NavBNBInvariant is StdInvariant, Test {
+contract NavBNBInvariantTest is StdInvariant, Test {
     NavBNB internal nav;
-    NavBNBHandler internal handler;
+    NavBNBHandlerTest internal handler;
 
     function setUp() public {
         nav = new NavBNB();
@@ -258,7 +258,7 @@ contract NavBNBInvariant is StdInvariant, Test {
         for (uint256 i = 0; i < users.length; i++) {
             vm.deal(users[i], 1_000 ether);
         }
-        handler = new NavBNBHandler(nav, users);
+        handler = new NavBNBHandlerTest(nav, users);
         targetContract(address(handler));
     }
 

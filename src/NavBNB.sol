@@ -62,8 +62,10 @@ contract NavBNB {
         require(msg.value > 0, "ZERO_DEPOSIT");
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
         uint256 valueAfterFee = msg.value - fee;
-        uint256 currentNav = nav();
-        uint256 minted = (valueAfterFee * 1e18) / currentNav;
+        uint256 preBalance = address(this).balance - msg.value;
+        uint256 preReserve = preBalance - queuedTotalOwedBNB;
+        uint256 navBefore = totalSupply == 0 ? 1e18 : (preReserve * 1e18) / totalSupply;
+        uint256 minted = (valueAfterFee * 1e18) / navBefore;
         _mint(msg.sender, minted);
         emit Deposit(msg.sender, msg.value, minted);
     }
