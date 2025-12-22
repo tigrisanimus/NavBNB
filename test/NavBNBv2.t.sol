@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "forge-std/StdInvariant.sol";
+import "forge-std/StdStorage.sol";
 import "src/NavBNBv2.sol";
 
 contract ToggleReceiver {
@@ -65,13 +66,13 @@ abstract contract NoLogBound is Test {
 }
 
 contract NavBNBv2Test is NoLogBound {
+    using stdStorage for StdStorage;
+
     NavBNBv2 internal nav;
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
-    uint256 internal constant SPENT_TODAY_SLOT = 5;
-    uint256 internal constant TRACKED_ASSETS_SLOT = 8;
 
     function setUp() public {
         nav = new NavBNBv2(guardian, recovery);
@@ -81,16 +82,12 @@ contract NavBNBv2Test is NoLogBound {
         vm.deal(recovery, 1_000 ether);
     }
 
-    function _mappingSlot(uint256 key, uint256 baseSlot) internal pure returns (bytes32) {
-        return keccak256(abi.encode(key, baseSlot));
-    }
-
     function _setSpentToday(uint256 day, uint256 value) internal {
-        vm.store(address(nav), _mappingSlot(day, SPENT_TODAY_SLOT), bytes32(value));
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(value);
     }
 
     function _setTrackedAssets(uint256 value) internal {
-        vm.store(address(nav), bytes32(uint256(TRACKED_ASSETS_SLOT)), bytes32(value));
+        stdstore.target(address(nav)).sig("trackedAssetsBNB()").checked_write(value);
     }
 
     function testDepositSlippage() public {
