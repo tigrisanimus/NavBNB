@@ -20,6 +20,8 @@ contract AnkrBNBYieldStrategyTest is Test {
     address internal guardian = address(0xBEEF);
     address internal alice = address(0xA11CE);
 
+    receive() external payable {}
+
     function setUp() public {
         ankrBNB = new MockERC20("ankrBNB", "ankrBNB");
         wbnb = new MockWBNB();
@@ -28,6 +30,7 @@ contract AnkrBNBYieldStrategyTest is Test {
         strategy = new AnkrBNBYieldStrategy(guardian, address(pool), address(ankrBNB), address(router), address(wbnb));
 
         wbnb.mint(address(router), 1_000 ether);
+        vm.deal(address(wbnb), 1_000 ether);
         vm.deal(address(this), 1_000 ether);
         vm.deal(alice, 100 ether);
     }
