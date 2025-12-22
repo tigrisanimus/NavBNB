@@ -28,12 +28,7 @@ contract AnkrBNBYieldStrategyTest is Test {
         pool = new MockAnkrPool(address(ankrBNB), ONE);
         router = new MockRouter(address(ankrBNB), address(wbnb));
         strategy = new AnkrBNBYieldStrategy(
-            address(this),
-            guardian,
-            address(pool),
-            address(ankrBNB),
-            address(router),
-            address(wbnb)
+            address(this), guardian, address(pool), address(ankrBNB), address(router), address(wbnb)
         );
 
         wbnb.mint(address(router), 1_000 ether);
@@ -131,14 +126,8 @@ contract NavBNBv2StrategyWiringTest is Test {
         MockWBNB wbnb
     ) internal returns (AnkrBNBYieldStrategy) {
         vm.prank(vault);
-        return new AnkrBNBYieldStrategy(
-            vault,
-            guardian,
-            address(pool),
-            address(ankrBNB),
-            address(router),
-            address(wbnb)
-        );
+        return
+            new AnkrBNBYieldStrategy(vault, guardian, address(pool), address(ankrBNB), address(router), address(wbnb));
     }
 
     function testNavBNBv2CanSetAnkrStrategyWhenEmpty() public {
@@ -150,14 +139,7 @@ contract NavBNBv2StrategyWiringTest is Test {
         MockWBNB wbnb = new MockWBNB();
         MockAnkrPool pool = new MockAnkrPool(address(ankrBNB), 1e18);
         MockRouter router = new MockRouter(address(ankrBNB), address(wbnb));
-        AnkrBNBYieldStrategy strategy = _deployStrategyForVault(
-            address(nav),
-            guardian,
-            pool,
-            ankrBNB,
-            router,
-            wbnb
-        );
+        AnkrBNBYieldStrategy strategy = _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb);
 
         vm.prank(guardian);
         nav.setStrategy(address(strategy));

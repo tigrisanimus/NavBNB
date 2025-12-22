@@ -23,11 +23,7 @@ contract MockRouter {
         liquidityOut = newLiquidityOut;
     }
 
-    function getAmountsOut(uint256 amountIn, address[] calldata path)
-        external
-        view
-        returns (uint256[] memory amounts)
-    {
+    function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts) {
         require(path.length == 2, "PATH");
         amounts = new uint256[](2);
         amounts[0] = amountIn;

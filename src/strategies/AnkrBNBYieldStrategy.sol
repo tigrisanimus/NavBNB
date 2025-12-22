@@ -162,13 +162,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         uint256 amountOutMin = (amountOutQuoted * (BPS - maxSlippageBps)) / BPS;
 
         _approve(ankrBNB, address(router), ankrToSwap);
-        uint256[] memory amounts = router.swapExactTokensForTokens(
-            ankrToSwap,
-            amountOutMin,
-            path,
-            address(this),
-            block.timestamp
-        );
+        uint256[] memory amounts =
+            router.swapExactTokensForTokens(ankrToSwap, amountOutMin, path, address(this), block.timestamp);
         _approve(ankrBNB, address(router), 0);
 
         uint256 wbnbOut = amounts[amounts.length - 1];
