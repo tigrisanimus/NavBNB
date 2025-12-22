@@ -56,8 +56,8 @@ contract NavBNBv2 {
     event RecoverSurplus(address indexed to, uint256 amount);
     event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
     event ClaimableCredited(address indexed user, uint256 amount);
-    event StrategyUpdated(address indexed oldStrategy, address indexed newStrategy);
-    event LiquidityBufferUpdated(uint256 oldBps, uint256 newBps);
+    event StrategyUpdated(address indexed newStrategy);
+    event LiquidityBufferUpdated(uint256 bps);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -144,9 +144,8 @@ contract NavBNBv2 {
         if (msg.sender != guardian) {
             revert NotGuardian();
         }
-        address oldStrategy = address(strategy);
         strategy = IBNBYieldStrategy(newStrategy);
-        emit StrategyUpdated(oldStrategy, newStrategy);
+        emit StrategyUpdated(newStrategy);
     }
 
     function setLiquidityBufferBPS(uint256 newBps) external nonReentrant {
@@ -156,9 +155,8 @@ contract NavBNBv2 {
         if (newBps > BPS) {
             revert Slippage();
         }
-        uint256 oldBps = liquidityBufferBPS;
         liquidityBufferBPS = newBps;
-        emit LiquidityBufferUpdated(oldBps, newBps);
+        emit LiquidityBufferUpdated(newBps);
     }
 
     function deposit(uint256 minSharesOut) external payable nonReentrant whenNotPaused {

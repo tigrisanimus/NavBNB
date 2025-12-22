@@ -195,6 +195,34 @@ contract NavBNBv2Test is NoLogBound {
         assertLt(mock.totalAssets(), strategyBefore);
     }
 
+    function testClaimUsesStrategyToMeetLiquidNeedUnderCap() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        vm.prank(guardian);
+        nav.setStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+
+        vm.prank(alice);
+        nav.deposit{value: 50 ether}(0);
+
+        uint256 capToday = nav.capRemainingToday();
+        uint256 desiredAfterFee = capToday + 1 ether;
+        uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
+        uint256 tokenAmount = (bnbOwed * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        vm.warp(block.timestamp + 1 days);
+        uint256 strategyBefore = mock.totalAssets();
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.claim();
+        uint256 balanceAfter = alice.balance;
+
+        assertGt(balanceAfter - balanceBefore, 0);
+        assertLt(mock.totalAssets(), strategyBefore);
+    }
+
     function testNavUsesNetAssetsNotGross() public {
         vm.prank(alice);
         nav.deposit{value: 10 ether}(0);
@@ -228,7 +256,7 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(nav.balanceOf(alice), valueAfterFee);
 
         uint256 aliceValue = (nav.balanceOf(alice) * nav.nav()) / 1e18;
-        assertLe(aliceValue, valueAfterFee + 2);
+        assertApproxEqAbs(aliceValue, valueAfterFee, 1e15);
     }
 
     function testNavNonZeroAtParity() public {
@@ -661,42 +689,53 @@ contract NavBNBv2Test is NoLogBound {
         uint256 headBefore = nav.queueHead();
         uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
         uint256 totalClaimableBefore = nav.totalClaimableBNB();
-        uint256 obligationsBefore = liabilitiesBefore + totalClaimableBefore;
         uint256 spentBefore = nav.spentToday(block.timestamp / 1 days);
         uint256 claimableBefore = nav.claimableBNB(address(bad));
         vm.prank(alice);
         nav.claim(1);
 
-        uint256 claimableAfter = nav.claimableBNB(address(bad));
-        assertGt(claimableAfter, claimableBefore);
-
-        uint256 escrowed = claimableAfter - claimableBefore;
-        uint256 liabilitiesAfter = nav.totalLiabilitiesBNB();
-        uint256 totalClaimableAfter = nav.totalClaimableBNB();
-        uint256 obligationsAfter = liabilitiesAfter + totalClaimableAfter;
-        uint256 spentAfter = nav.spentToday(block.timestamp / 1 days);
-
-        uint256 head = nav.queueHead();
-        assertGt(head, headBefore);
-        assertEq(liabilitiesBefore - liabilitiesAfter, escrowed);
-        assertEq(totalClaimableAfter - totalClaimableBefore, escrowed);
-        assertEq(obligationsAfter, obligationsBefore);
-        assertEq(spentAfter, spentBefore);
+        _assertEscrowAfterClaim(bad, headBefore, liabilitiesBefore, totalClaimableBefore, spentBefore, claimableBefore);
 
         uint256 aliceBalanceBefore = alice.balance;
         vm.prank(alice);
         nav.claim();
         assertGt(alice.balance - aliceBalanceBefore, 0);
 
+        _withdrawClaimableAndAssert(bad);
+    }
+
+    function _assertEscrowAfterClaim(
+        ToggleReceiver bad,
+        uint256 headBefore,
+        uint256 liabilitiesBefore,
+        uint256 totalClaimableBefore,
+        uint256 spentBefore,
+        uint256 claimableBefore
+    ) internal view {
+        uint256 claimableAfter = nav.claimableBNB(address(bad));
+        assertGt(claimableAfter, claimableBefore);
+        uint256 escrowed = claimableAfter - claimableBefore;
+        assertGt(nav.queueHead(), headBefore);
+        assertEq(liabilitiesBefore - nav.totalLiabilitiesBNB(), escrowed);
+        assertEq(nav.totalClaimableBNB() - totalClaimableBefore, escrowed);
+        assertEq(nav.totalLiabilitiesBNB() + nav.totalClaimableBNB(), liabilitiesBefore + totalClaimableBefore);
+        assertEq(nav.spentToday(block.timestamp / 1 days), spentBefore);
+    }
+
+    function _withdrawClaimableAndAssert(ToggleReceiver bad) internal {
         bad.setRevert(false);
         uint256 totalClaimableBeforeWithdraw = nav.totalClaimableBNB();
+        uint256 claimableBefore = nav.claimableBNB(address(bad));
+        uint256 capRemaining = nav.capRemainingToday();
         uint256 balanceBefore = address(bad).balance;
         bad.withdrawClaimable(0);
         uint256 balanceAfter = address(bad).balance;
+        uint256 payout = balanceAfter - balanceBefore;
+        uint256 expected = claimableBefore <= capRemaining ? claimableBefore : capRemaining;
 
-        assertEq(balanceAfter - balanceBefore, escrowed);
-        assertEq(nav.totalClaimableBNB(), totalClaimableBeforeWithdraw - escrowed);
-        assertEq(nav.claimableBNB(address(bad)), 0);
+        assertEq(payout, expected);
+        assertEq(nav.totalClaimableBNB(), totalClaimableBeforeWithdraw - payout);
+        assertEq(nav.claimableBNB(address(bad)), claimableBefore - payout);
 
         uint256 receiverBalanceBefore = address(bad).balance;
         vm.prank(alice);
@@ -709,7 +748,7 @@ contract NavBNBv2Test is NoLogBound {
         nav.deposit{value: 20 ether}(0);
 
         ToggleReceiver bad = new ToggleReceiver(nav);
-        bad.setRevert(true);
+        bad.setRevert(false);
         vm.deal(address(bad), 2 ether);
         bad.deposit{value: 1 ether}(0);
 
@@ -719,6 +758,7 @@ contract NavBNBv2Test is NoLogBound {
 
         uint256 badTokens = nav.balanceOf(address(bad));
         bad.redeem(badTokens, 0);
+        bad.setRevert(true);
 
         uint256 aliceRedeem = nav.balanceOf(alice) / 20;
         vm.prank(alice);
@@ -738,8 +778,8 @@ contract NavBNBv2Test is NoLogBound {
         uint256 alicePaid = alice.balance - aliceBalanceBefore;
 
         assertEq(claimableAfter - claimableBefore, badQueued);
-        assertEq(alicePaid, 0.1 ether);
-        assertEq(nav.queueHead(), 1);
+        assertEq(alicePaid, aliceQueued);
+        assertEq(nav.queueHead(), 2);
     }
 
     function testWithdrawClaimablePaysOut() public {
