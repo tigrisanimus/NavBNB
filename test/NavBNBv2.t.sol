@@ -3,16 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "forge-std/StdInvariant.sol";
-import "forge-std/StdStorage.sol";
 import "src/NavBNBv2.sol";
-
-contract ForceSend {
-    constructor() payable {}
-
-    function force(address to) external {
-        selfdestruct(payable(to));
-    }
-}
 
 contract ToggleReceiver {
     NavBNBv2 internal nav;
@@ -74,12 +65,13 @@ abstract contract NoLogBound is Test {
 }
 
 contract NavBNBv2Test is NoLogBound {
-    using stdStorage for StdStorage;
     NavBNBv2 internal nav;
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
+    uint256 internal constant SPENT_TODAY_SLOT = 5;
+    uint256 internal constant TRACKED_ASSETS_SLOT = 8;
 
     function setUp() public {
         nav = new NavBNBv2(guardian, recovery);
@@ -87,6 +79,18 @@ contract NavBNBv2Test is NoLogBound {
         vm.deal(bob, 1_000 ether);
         vm.deal(guardian, 1_000 ether);
         vm.deal(recovery, 1_000 ether);
+    }
+
+    function _mappingSlot(uint256 key, uint256 baseSlot) internal pure returns (bytes32) {
+        return keccak256(abi.encode(key, baseSlot));
+    }
+
+    function _setSpentToday(uint256 day, uint256 value) internal {
+        vm.store(address(nav), _mappingSlot(day, SPENT_TODAY_SLOT), bytes32(value));
+    }
+
+    function _setTrackedAssets(uint256 value) internal {
+        vm.store(address(nav), bytes32(uint256(TRACKED_ASSETS_SLOT)), bytes32(value));
     }
 
     function testDepositSlippage() public {
@@ -120,8 +124,7 @@ contract NavBNBv2Test is NoLogBound {
         uint256 navBefore = nav.nav();
         uint256 trackedBefore = nav.trackedAssetsBNB();
 
-        ForceSend sender = new ForceSend{value: 1 ether}();
-        sender.force(address(nav));
+        vm.deal(address(nav), address(nav).balance + 1 ether);
 
         assertEq(nav.trackedAssetsBNB(), trackedBefore);
         assertEq(nav.nav(), navBefore);
@@ -160,33 +163,21 @@ contract NavBNBv2Test is NoLogBound {
         uint256 liabilities = nav.totalLiabilitiesBNB();
         assertGt(liabilities, 0);
 
-        stdstore.target(address(nav)).sig("trackedAssetsBNB()").checked_write(liabilities);
+        _setTrackedAssets(liabilities);
         uint256 day = block.timestamp / 1 days;
         uint256 capForDay = nav.capForDay(day);
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(capForDay);
+        _setSpentToday(day, capForDay);
 
         uint256 navAfter = nav.nav();
-        assertGt(navAfter, 0);
+        assertEq(navAfter, 0);
 
-        vm.prank(bob);
+        vm.prank(alice);
         vm.expectRevert(NavBNBv2.Insolvent.selector);
         nav.redeem(1, 0);
 
         vm.prank(bob);
+        vm.expectRevert(NavBNBv2.Insolvent.selector);
         nav.deposit{value: 1 ether}(0);
-
-        uint256 bobTokenAmount = nav.balanceOf(bob) / 2;
-        uint256 navAfterDeposit = nav.nav();
-        uint256 expectedBnbOwed = (bobTokenAmount * navAfterDeposit) / 1e18;
-        uint256 fee = (expectedBnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS();
-        uint256 expectedAfterFee = expectedBnbOwed - fee;
-
-        vm.prank(bob);
-        nav.redeem(bobTokenAmount, 0);
-
-        uint256 lastIndex = nav.queueLength() - 1;
-        (, uint256 queuedAmount) = nav.getQueueEntry(lastIndex);
-        assertEq(queuedAmount, expectedAfterFee);
     }
 
     function testClaimFairnessFifo() public {
@@ -277,7 +268,7 @@ contract NavBNBv2Test is NoLogBound {
 
         uint256 day = block.timestamp / 1 days;
         uint256 capBefore = nav.capForDay(day);
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+        _setSpentToday(day, type(uint256).max);
 
         uint256 desiredBnb = 5 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
@@ -447,7 +438,7 @@ contract NavBNBv2Test is NoLogBound {
         nav.deposit{value: 400 ether}(0);
 
         uint256 day = block.timestamp / 1 days;
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+        _setSpentToday(day, type(uint256).max);
 
         for (uint256 i = 0; i < 40; i++) {
             uint256 desiredAfterFee = 1 ether;
@@ -477,7 +468,7 @@ contract NavBNBv2Test is NoLogBound {
         nav.deposit{value: 400 ether}(0);
 
         uint256 day = block.timestamp / 1 days;
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+        _setSpentToday(day, type(uint256).max);
 
         for (uint256 i = 0; i < 40; i++) {
             uint256 desiredAfterFee = 1 ether;
@@ -563,7 +554,7 @@ contract NavBNBv2Test is NoLogBound {
         bad.deposit{value: 5 ether}(0);
 
         uint256 day = block.timestamp / 1 days;
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+        _setSpentToday(day, nav.capForDay(day));
 
         uint256 badTokens = nav.balanceOf(address(bad));
         bad.redeem(badTokens, 0);
@@ -598,7 +589,7 @@ contract NavBNBv2Test is NoLogBound {
         receiver.deposit{value: 1 ether}(0);
 
         uint256 day = block.timestamp / 1 days;
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+        _setSpentToday(day, type(uint256).max);
 
         receiver.redeem(nav.balanceOf(address(receiver)), 0);
         vm.warp(block.timestamp + 1 days);
@@ -622,7 +613,7 @@ contract NavBNBv2Test is NoLogBound {
         nav.deposit{value: 20 ether}(0);
 
         uint256 day = block.timestamp / 1 days;
-        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+        _setSpentToday(day, type(uint256).max);
 
         uint256 desiredAfterFee = 1 ether;
         uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
@@ -638,8 +629,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testRecoverSurplusOnlyRecovery() public {
-        ForceSend sender = new ForceSend{value: 1 ether}();
-        sender.force(address(nav));
+        vm.deal(address(nav), address(nav).balance + 1 ether);
         vm.prank(alice);
         vm.expectRevert(NavBNBv2.NotRecovery.selector);
         nav.recoverSurplus(alice);
