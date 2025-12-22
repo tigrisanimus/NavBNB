@@ -135,7 +135,7 @@ contract NavBNBv2 {
         if (msg.value == 0) {
             revert ZeroDeposit();
         }
-        if (trackedAssetsBNB < _totalObligations()) {
+        if (trackedAssetsBNB <= _totalObligations()) {
             revert Insolvent();
         }
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
@@ -296,7 +296,12 @@ contract NavBNBv2 {
         if (totalSupply == 0) {
             return 1e18;
         }
-        return (trackedAssetsBNB * 1e18) / totalSupply;
+        uint256 obligations = _totalObligations();
+        if (trackedAssetsBNB <= obligations) {
+            return 0;
+        }
+        uint256 netAssets = trackedAssetsBNB - obligations;
+        return (netAssets * 1e18) / totalSupply;
     }
 
     function reserveBNB() public view returns (uint256) {
