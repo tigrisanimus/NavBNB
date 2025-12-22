@@ -58,6 +58,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     error BnbSendFail();
     error ApprovalFailed();
     error TransferFailed();
+    error ZeroAddress();
 
     modifier onlyVault() {
         if (msg.sender != vault) {
@@ -80,13 +81,23 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         _;
     }
 
-    constructor(address guardian_, address bnbStakingPool_, address ankrBNB_, address router_, address wbnb_) {
+    constructor(
+        address vault_,
+        address guardian_,
+        address bnbStakingPool_,
+        address ankrBNB_,
+        address router_,
+        address wbnb_
+    ) {
+        if (vault_ == address(0)) {
+            revert ZeroAddress();
+        }
         guardian = guardian_;
         stakingPool = IAnkrBNBStakingPool(bnbStakingPool_);
         ankrBNB = IERC20(ankrBNB_);
         router = IRouter(router_);
         wbnb = IWBNB(wbnb_);
-        vault = msg.sender;
+        vault = vault_;
         maxSlippageBps = 100;
     }
 
