@@ -422,19 +422,15 @@ contract NavBNBHandlerTest is NoLogBound {
             return;
         }
         uint256 amount = bound(amountSeed, 1, balance);
-        uint256 navBefore = nav.nav();
-        uint256 bnbOwed = (amount * navBefore) / 1e18;
-        uint256 bps = nav.BPS();
-        uint256 feeBps = nav.REDEEM_FEE_BPS();
-        uint256 fee = (bnbOwed * feeBps) / bps;
-        uint256 bnbAfterFee = bnbOwed - fee;
+        uint256 bnbOwed = (amount * nav.nav()) / 1e18;
+        uint256 bnbAfterFee = bnbOwed - (bnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS();
         if (bnbAfterFee == 0) {
             return;
         }
         uint256 day = block.timestamp / 1 days;
-        uint256 cap = nav.capForDay(day);
+        uint256 capRemaining = nav.capForDay(day);
         uint256 spent = nav.spentToday(day);
-        uint256 capRemaining = cap > spent ? cap - spent : 0;
+        capRemaining = capRemaining > spent ? capRemaining - spent : 0;
         uint256 available = capRemaining;
         uint256 balanceBNB = address(nav).balance;
         if (available > balanceBNB) {
