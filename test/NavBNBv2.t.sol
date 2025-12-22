@@ -349,6 +349,19 @@ contract NavBNBv2Test is NoLogBound {
         assertApproxEqAbs(balanceAfter - balanceBefore, expected, 2);
     }
 
+    function testEmergencyRedeemMinimumFeeForDust() public {
+        vm.prank(alice);
+        nav.deposit{value: 10}(0);
+
+        uint256 tokenAmount = 2;
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeem(tokenAmount, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, 1);
+    }
+
     function testEmergencyRedeemDoesNotTouchQueue() public {
         vm.prank(alice);
         nav.deposit{value: 20 ether}(0);
@@ -561,20 +574,86 @@ contract NavBNBv2Test is NoLogBound {
         nav.redeem(aliceRedeem, 0);
 
         vm.warp(block.timestamp + 1 days);
+        uint256 headBefore = nav.queueHead();
+        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
+        uint256 totalClaimableBefore = nav.totalClaimableBNB();
+        uint256 obligationsBefore = liabilitiesBefore + totalClaimableBefore;
+        uint256 spentBefore = nav.spentToday(block.timestamp / 1 days);
         uint256 claimableBefore = nav.claimableBNB(address(bad));
         vm.prank(alice);
-        nav.claim();
+        nav.claim(1);
 
         uint256 claimableAfter = nav.claimableBNB(address(bad));
         assertGt(claimableAfter, claimableBefore);
 
+        uint256 escrowed = claimableAfter - claimableBefore;
+        uint256 liabilitiesAfter = nav.totalLiabilitiesBNB();
+        uint256 totalClaimableAfter = nav.totalClaimableBNB();
+        uint256 obligationsAfter = liabilitiesAfter + totalClaimableAfter;
+        uint256 spentAfter = nav.spentToday(block.timestamp / 1 days);
+
         uint256 head = nav.queueHead();
-        assertGt(head, 0);
+        assertGt(head, headBefore);
+        assertEq(liabilitiesBefore - liabilitiesAfter, escrowed);
+        assertEq(totalClaimableAfter - totalClaimableBefore, escrowed);
+        assertEq(obligationsAfter, obligationsBefore);
+        assertEq(spentAfter, spentBefore);
 
         uint256 aliceBalanceBefore = alice.balance;
         vm.prank(alice);
         nav.claim();
         assertGt(alice.balance - aliceBalanceBefore, 0);
+
+        bad.setRevert(false);
+        uint256 totalClaimableBeforeWithdraw = nav.totalClaimableBNB();
+        uint256 balanceBefore = address(bad).balance;
+        bad.withdrawClaimable(0);
+        uint256 balanceAfter = address(bad).balance;
+
+        assertEq(balanceAfter - balanceBefore, escrowed);
+        assertEq(nav.totalClaimableBNB(), totalClaimableBeforeWithdraw - escrowed);
+        assertEq(nav.claimableBNB(address(bad)), 0);
+
+        uint256 receiverBalanceBefore = address(bad).balance;
+        vm.prank(alice);
+        nav.claim(1);
+        assertEq(address(bad).balance, receiverBalanceBefore);
+    }
+
+    function testQueueHeadFailureDoesNotLimitLaterPayments() public {
+        vm.prank(alice);
+        nav.deposit{value: 20 ether}(0);
+
+        ToggleReceiver bad = new ToggleReceiver(nav);
+        bad.setRevert(true);
+        vm.deal(address(bad), 2 ether);
+        bad.deposit{value: 1 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        _setSpentToday(day, nav.capForDay(day));
+
+        uint256 badTokens = nav.balanceOf(address(bad));
+        bad.redeem(badTokens, 0);
+
+        uint256 aliceRedeem = nav.balanceOf(alice) / 20;
+        vm.prank(alice);
+        nav.redeem(aliceRedeem, 0);
+
+        (, uint256 badQueued) = nav.getQueueEntry(0);
+        (, uint256 aliceQueued) = nav.getQueueEntry(1);
+
+        vm.warp(block.timestamp + 1 days);
+        uint256 aliceBalanceBefore = alice.balance;
+        uint256 claimableBefore = nav.claimableBNB(address(bad));
+
+        vm.prank(alice);
+        nav.claim(2);
+
+        uint256 claimableAfter = nav.claimableBNB(address(bad));
+        uint256 alicePaid = alice.balance - aliceBalanceBefore;
+
+        assertEq(claimableAfter - claimableBefore, badQueued);
+        assertEq(alicePaid, aliceQueued);
     }
 
     function testWithdrawClaimablePaysOut() public {
@@ -631,6 +710,43 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         vm.expectRevert(NavBNBv2.NotRecovery.selector);
         nav.recoverSurplus(alice);
+    }
+
+    function testRecoverSurplusRejectsInvalidRecipient() public {
+        vm.deal(address(nav), address(nav).balance + 1 ether);
+        vm.prank(recovery);
+        vm.expectRevert(NavBNBv2.InvalidRecipient.selector);
+        nav.recoverSurplus(address(0));
+    }
+
+    function testWithdrawProtocolFeesRejectsInvalidRecipient() public {
+        vm.prank(recovery);
+        vm.expectRevert(NavBNBv2.InvalidRecipient.selector);
+        nav.withdrawProtocolFees(address(0), 1);
+    }
+
+    function testZeroSupplySweepsTrackedAssets() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 totalSupply = nav.totalSupply();
+        vm.prank(alice);
+        nav.emergencyRedeem(totalSupply, 0);
+
+        assertEq(nav.totalSupply(), 0);
+        assertEq(nav.trackedAssetsBNB(), 0);
+        assertEq(nav.protocolFeesBNB(), address(nav).balance);
+
+        uint256 protocolFeesBefore = nav.protocolFeesBNB();
+        uint256 amount = 1 ether;
+        uint256 fee = (amount * nav.MINT_FEE_BPS()) / nav.BPS();
+        uint256 valueAfterFee = amount - fee;
+
+        vm.prank(bob);
+        nav.deposit{value: amount}(0);
+
+        assertEq(nav.balanceOf(bob), valueAfterFee);
+        assertEq(nav.protocolFeesBNB(), protocolFeesBefore);
     }
 }
 
