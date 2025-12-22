@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
+import {IBNBYieldStrategy} from "./IBNBYieldStrategy.sol";
+
 contract NavBNBv2 {
     string public constant name = "NavBNBv2";
     string public constant symbol = "nBNBv2";
@@ -25,6 +27,9 @@ contract NavBNBv2 {
 
     uint256 public trackedAssetsBNB;
     mapping(address => uint256) public claimableBNB;
+
+    IBNBYieldStrategy public strategy;
+    uint256 public liquidityBufferBPS = 1_000;
 
     address public immutable guardian;
     address public immutable recovery;
@@ -51,6 +56,8 @@ contract NavBNBv2 {
     event RecoverSurplus(address indexed to, uint256 amount);
     event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
     event ClaimableCredited(address indexed user, uint256 amount);
+    event StrategyUpdated(address indexed oldStrategy, address indexed newStrategy);
+    event LiquidityBufferUpdated(uint256 oldBps, uint256 newBps);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -133,30 +140,54 @@ contract NavBNBv2 {
         emit Unpaused(msg.sender);
     }
 
+    function setStrategy(address newStrategy) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        address oldStrategy = address(strategy);
+        strategy = IBNBYieldStrategy(newStrategy);
+        emit StrategyUpdated(oldStrategy, newStrategy);
+    }
+
+    function setLiquidityBufferBPS(uint256 newBps) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        if (newBps > BPS) {
+            revert Slippage();
+        }
+        uint256 oldBps = liquidityBufferBPS;
+        liquidityBufferBPS = newBps;
+        emit LiquidityBufferUpdated(oldBps, newBps);
+    }
+
     function deposit(uint256 minSharesOut) external payable nonReentrant whenNotPaused {
         if (msg.value == 0) {
             revert ZeroDeposit();
         }
-        if (totalSupply > 0 && trackedAssetsBNB <= _totalObligations()) {
+        uint256 assetsBefore = totalAssets() - msg.value;
+        if (totalSupply > 0 && assetsBefore <= _totalObligations()) {
             revert Insolvent();
         }
         if (totalSupply == 0) {
             if (_totalObligations() > 0) {
                 revert NoEquity();
             }
-            if (trackedAssetsBNB > 0) {
-                _mint(recovery, trackedAssetsBNB);
+            if (assetsBefore > 0) {
+                // Protect against free capture of pre-existing assets on first deposit.
+                _mint(recovery, assetsBefore);
             }
         }
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
         uint256 valueAfterFee = msg.value - fee;
-        uint256 navBefore = nav();
+        uint256 navBefore = _navWithAssets(assetsBefore);
         uint256 minted = (valueAfterFee * 1e18) / navBefore;
         if (minted < minSharesOut) {
             revert Slippage();
         }
-        trackedAssetsBNB += msg.value;
         _mint(msg.sender, minted);
+        trackedAssetsBNB = totalAssets();
+        _investExcess();
         emit Deposit(msg.sender, msg.value, minted);
     }
 
@@ -165,7 +196,7 @@ contract NavBNBv2 {
             revert ZeroRedeem();
         }
         uint256 obligations = _totalObligations();
-        if (trackedAssetsBNB <= obligations) {
+        if (totalAssets() <= obligations) {
             revert Insolvent();
         }
         uint256 currentNav = nav();
@@ -216,11 +247,12 @@ contract NavBNBv2 {
 
         if (bnbPaid > 0) {
             spentToday[day] += bnbPaid;
-            trackedAssetsBNB -= bnbPaid;
+            _ensureLiquidity(bnbPaid);
             (bool success,) = msg.sender.call{value: bnbPaid}("");
             if (!success) {
                 revert BnbSendFail();
             }
+            trackedAssetsBNB = totalAssets();
         }
 
         _burn(msg.sender, tokenAmount);
@@ -239,7 +271,7 @@ contract NavBNBv2 {
         if (totalLiabilitiesBNB == 0) {
             return;
         }
-        if (trackedAssetsBNB < _totalObligations()) {
+        if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
         uint256 day = _currentDay();
@@ -258,7 +290,7 @@ contract NavBNBv2 {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
-        if (trackedAssetsBNB < _totalObligations()) {
+        if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
         if (totalLiabilitiesBNB > 0) {
@@ -278,11 +310,12 @@ contract NavBNBv2 {
         if (bnbOut < minBnbOut) {
             revert Slippage();
         }
-        trackedAssetsBNB -= bnbOut;
+        _ensureLiquidity(bnbOut);
         (bool success,) = msg.sender.call{value: bnbOut}("");
         if (!success) {
             revert BnbSendFail();
         }
+        trackedAssetsBNB = totalAssets();
 
         _burn(msg.sender, tokenAmount);
         emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
@@ -307,22 +340,20 @@ contract NavBNBv2 {
     }
 
     function nav() public view returns (uint256) {
-        if (totalSupply == 0) {
-            return 1e18;
-        }
-        uint256 obligations = _totalObligations();
-        if (trackedAssetsBNB <= obligations) {
-            return 0;
-        }
-        uint256 netAssets = trackedAssetsBNB - obligations;
-        return (netAssets * 1e18) / totalSupply;
+        return _navWithAssets(totalAssets());
     }
 
     function reserveBNB() public view returns (uint256) {
-        if (trackedAssetsBNB <= totalLiabilitiesBNB) {
+        uint256 assets = totalAssets();
+        if (assets <= totalLiabilitiesBNB) {
             return 0;
         }
-        return trackedAssetsBNB - totalLiabilitiesBNB;
+        return assets - totalLiabilitiesBNB;
+    }
+
+    function totalAssets() public view returns (uint256) {
+        uint256 strategyAssets = address(strategy) == address(0) ? 0 : strategy.totalAssets();
+        return address(this).balance + strategyAssets;
     }
 
     function untrackedSurplusBNB() public view returns (uint256) {
@@ -339,14 +370,14 @@ contract NavBNBv2 {
     }
 
     function _dayCap(uint256 day) internal view returns (uint256) {
-        uint256 base = capBaseSet[day] ? capBaseBNB[day] : trackedAssetsBNB;
+        uint256 base = capBaseSet[day] ? capBaseBNB[day] : totalAssets();
         return (base * CAP_BPS) / BPS;
     }
 
     function _initCapBase(uint256 day) internal {
         if (!capBaseSet[day]) {
             capBaseSet[day] = true;
-            capBaseBNB[day] = trackedAssetsBNB;
+            capBaseBNB[day] = totalAssets();
         }
     }
 
@@ -367,7 +398,8 @@ contract NavBNBv2 {
     function _availableForDay(uint256 day) internal view returns (uint256) {
         uint256 capRemaining = _capRemaining(day);
         uint256 available = capRemaining < totalLiabilitiesBNB ? capRemaining : totalLiabilitiesBNB;
-        return available < trackedAssetsBNB ? available : trackedAssetsBNB;
+        uint256 assets = totalAssets();
+        return available < assets ? available : assets;
     }
 
     function _currentDay() internal view returns (uint256) {
@@ -395,7 +427,7 @@ contract NavBNBv2 {
         if (maxAmount == 0 || totalLiabilitiesBNB == 0) {
             return 0;
         }
-        uint256 liquid = trackedAssetsBNB > totalClaimableBNB ? trackedAssetsBNB - totalClaimableBNB : 0;
+        uint256 liquid = totalAssets() > totalClaimableBNB ? totalAssets() - totalClaimableBNB : 0;
         uint256 remainingCap = maxAmount;
         if (remainingCap > totalLiabilitiesBNB) {
             remainingCap = totalLiabilitiesBNB;
@@ -403,6 +435,15 @@ contract NavBNBv2 {
         uint256 remainingLiquid = liquid;
         if (remainingLiquid > totalLiabilitiesBNB) {
             remainingLiquid = totalLiabilitiesBNB;
+        }
+        uint256 payBudget = remainingCap;
+        if (payBudget > remainingLiquid) {
+            payBudget = remainingLiquid;
+        }
+        _ensureLiquidity(payBudget);
+        remainingLiquid = address(this).balance;
+        if (remainingLiquid > payBudget) {
+            remainingLiquid = payBudget;
         }
         uint256 head = queueHead;
         uint256 steps;
@@ -434,7 +475,6 @@ contract NavBNBv2 {
                 steps++;
                 continue;
             } else {
-                trackedAssetsBNB -= pay;
                 spentToday[day] += pay;
                 paid += pay;
                 remainingCap -= pay;
@@ -448,6 +488,9 @@ contract NavBNBv2 {
             }
         }
         queueHead = head;
+        if (paid > 0) {
+            trackedAssetsBNB = totalAssets();
+        }
     }
 
     function queueLength() external view returns (uint256) {
@@ -485,15 +528,16 @@ contract NavBNBv2 {
         if (claimable == 0) {
             return;
         }
-        if (trackedAssetsBNB < _totalObligations()) {
+        if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
         uint256 day = _currentDay();
         _initCapBase(day);
         uint256 capRemaining = _capRemaining(day);
         uint256 payout = claimable <= capRemaining ? claimable : capRemaining;
-        if (payout > trackedAssetsBNB) {
-            payout = trackedAssetsBNB;
+        uint256 assets = totalAssets();
+        if (payout > assets) {
+            payout = assets;
         }
         if (payout < minOut) {
             revert Slippage();
@@ -503,11 +547,53 @@ contract NavBNBv2 {
         }
         claimableBNB[msg.sender] = claimable - payout;
         totalClaimableBNB -= payout;
-        trackedAssetsBNB -= payout;
         spentToday[day] += payout;
+        _ensureLiquidity(payout);
         (bool success,) = msg.sender.call{value: payout}("");
         if (!success) {
             revert BnbSendFail();
+        }
+        trackedAssetsBNB = totalAssets();
+    }
+
+    function _navWithAssets(uint256 assets) internal view returns (uint256) {
+        if (totalSupply == 0) {
+            return 1e18;
+        }
+        uint256 obligations = _totalObligations();
+        if (assets <= obligations) {
+            return 0;
+        }
+        uint256 netAssets = assets - obligations;
+        return (netAssets * 1e18) / totalSupply;
+    }
+
+    function _investExcess() internal {
+        if (address(strategy) == address(0)) {
+            return;
+        }
+        uint256 assets = totalAssets();
+        uint256 bufferTarget = (assets * liquidityBufferBPS) / BPS;
+        uint256 balance = address(this).balance;
+        if (balance > bufferTarget) {
+            uint256 excess = balance - bufferTarget;
+            strategy.deposit{value: excess}();
+        }
+    }
+
+    function _ensureLiquidity(uint256 needed) internal {
+        if (needed == 0 || address(strategy) == address(0)) {
+            return;
+        }
+        uint256 balance = address(this).balance;
+        if (balance >= needed) {
+            return;
+        }
+        uint256 shortfall = needed - balance;
+        uint256 available = strategy.totalAssets();
+        uint256 received = strategy.withdraw(shortfall);
+        if (available > 0 && received == 0) {
+            revert Insolvent();
         }
     }
 
