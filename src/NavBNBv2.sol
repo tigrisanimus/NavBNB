@@ -24,7 +24,6 @@ contract NavBNBv2 {
     mapping(uint256 => bool) internal capBaseSet;
 
     uint256 public trackedAssetsBNB;
-    uint256 public protocolFeesBNB;
     mapping(address => uint256) public claimableBNB;
 
     address public immutable guardian;
@@ -52,8 +51,6 @@ contract NavBNBv2 {
     event RecoverSurplus(address indexed to, uint256 amount);
     event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
     event ClaimableCredited(address indexed user, uint256 amount);
-    event ZeroSupplySwept(uint256 sweptAmount);
-    event ProtocolFeesWithdrawn(address indexed to, uint256 amount);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -71,8 +68,7 @@ contract NavBNBv2 {
     error BnbSendFail();
     error QueueActive();
     error InvalidRecipient();
-    error OutstandingObligations();
-    error InsufficientProtocolFees();
+    error NoEquity();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -143,6 +139,14 @@ contract NavBNBv2 {
         }
         if (totalSupply > 0 && trackedAssetsBNB <= _totalObligations()) {
             revert Insolvent();
+        }
+        if (totalSupply == 0) {
+            if (_totalObligations() > 0) {
+                revert NoEquity();
+            }
+            if (trackedAssetsBNB > 0) {
+                _mint(recovery, trackedAssetsBNB);
+            }
         }
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
         uint256 valueAfterFee = msg.value - fee;
@@ -263,9 +267,9 @@ contract NavBNBv2 {
         _initCapBase(_currentDay());
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
-        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
-        if (bnbOwed > 0 && fee == 0) {
-            fee = 1;
+        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS + (BPS - 1)) / BPS;
+        if (fee > bnbOwed) {
+            fee = bnbOwed;
         }
         uint256 bnbOut = bnbOwed - fee;
         if (bnbOut == 0) {
@@ -282,27 +286,6 @@ contract NavBNBv2 {
 
         _burn(msg.sender, tokenAmount);
         emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
-    }
-
-    function withdrawProtocolFees(address to, uint256 amount) external nonReentrant {
-        if (msg.sender != recovery) {
-            revert NotRecovery();
-        }
-        if (to == address(0) || to == address(this)) {
-            revert InvalidRecipient();
-        }
-        if (amount == 0) {
-            return;
-        }
-        if (amount > protocolFeesBNB) {
-            revert InsufficientProtocolFees();
-        }
-        protocolFeesBNB -= amount;
-        (bool success,) = to.call{value: amount}("");
-        if (!success) {
-            revert BnbSendFail();
-        }
-        emit ProtocolFeesWithdrawn(to, amount);
     }
 
     function recoverSurplus(address to) external nonReentrant {
@@ -344,7 +327,7 @@ contract NavBNBv2 {
 
     function untrackedSurplusBNB() public view returns (uint256) {
         uint256 balance = address(this).balance;
-        uint256 reserved = trackedAssetsBNB + protocolFeesBNB;
+        uint256 reserved = trackedAssetsBNB + totalClaimableBNB;
         if (balance <= reserved) {
             return 0;
         }
@@ -436,13 +419,19 @@ contract NavBNBv2 {
             totalLiabilitiesBNB -= pay;
             (bool success,) = entry.user.call{value: pay}("");
             if (!success) {
-                claimableBNB[entry.user] += pay;
-                totalClaimableBNB += pay;
-                emit ClaimableCredited(entry.user, pay);
-                if (entry.amount == 0) {
-                    head++;
-                    steps++;
+                uint256 credited = pay + entry.amount;
+                entry.amount = 0;
+                totalLiabilitiesBNB -= credited - pay;
+                claimableBNB[entry.user] += credited;
+                totalClaimableBNB += credited;
+                emit ClaimableCredited(entry.user, credited);
+                if (credited >= remainingLiquid) {
+                    remainingLiquid = 0;
+                } else {
+                    remainingLiquid -= credited;
                 }
+                head++;
+                steps++;
                 continue;
             } else {
                 trackedAssetsBNB -= pay;
@@ -475,20 +464,20 @@ contract NavBNBv2 {
         if (head == 0 || maxMoves == 0) {
             return;
         }
-        uint256 moves = maxMoves;
-        if (moves > head) {
-            moves = head;
-        }
         uint256 len = queue.length;
-        uint256 activeLength = len - head;
-        uint256 newHead = head - moves;
-        for (uint256 i = 0; i < activeLength; i++) {
-            queue[newHead + i] = queue[head + i];
+        uint256 remaining = len - head;
+        if (maxMoves < remaining) {
+            return;
         }
-        for (uint256 i = 0; i < moves; i++) {
-            queue.pop();
+        QueueEntry[] memory entries = new QueueEntry[](remaining);
+        for (uint256 i = 0; i < remaining; i++) {
+            entries[i] = queue[head + i];
         }
-        queueHead = newHead;
+        delete queue;
+        for (uint256 i = 0; i < remaining; i++) {
+            queue.push(entries[i]);
+        }
+        queueHead = 0;
     }
 
     function withdrawClaimable(uint256 minOut) external nonReentrant whenNotPaused {
@@ -552,14 +541,5 @@ contract NavBNBv2 {
         balanceOf[from] = bal - amount;
         totalSupply -= amount;
         emit Transfer(from, address(0), amount);
-        if (totalSupply == 0) {
-            if (_totalObligations() != 0) {
-                revert OutstandingObligations();
-            }
-            uint256 swept = trackedAssetsBNB;
-            protocolFeesBNB += swept;
-            trackedAssetsBNB = 0;
-            emit ZeroSupplySwept(swept);
-        }
     }
 }
