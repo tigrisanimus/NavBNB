@@ -154,7 +154,8 @@ contract NavBNBv2 {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
-        if (trackedAssetsBNB < _totalObligations()) {
+        uint256 obligations = _totalObligations();
+        if (trackedAssetsBNB <= obligations) {
             revert Insolvent();
         }
         uint256 currentNav = nav();
@@ -295,12 +296,7 @@ contract NavBNBv2 {
         if (totalSupply == 0) {
             return 1e18;
         }
-        uint256 obligations = _totalObligations();
-        if (trackedAssetsBNB <= obligations) {
-            return 0;
-        }
-        uint256 netAssets = trackedAssetsBNB - obligations;
-        return (netAssets * 1e18) / totalSupply;
+        return (trackedAssetsBNB * 1e18) / totalSupply;
     }
 
     function reserveBNB() public view returns (uint256) {

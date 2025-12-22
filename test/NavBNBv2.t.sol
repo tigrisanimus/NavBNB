@@ -565,7 +565,8 @@ contract NavBNBv2Test is NoLogBound {
         uint256 day = block.timestamp / 1 days;
         stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
 
-        uint256 badTokens = nav.balanceOf(address(bad));
+        uint256 badTokens;
+        badTokens = nav.balanceOf(address(bad));
         bad.redeem(badTokens, 0);
 
         vm.prank(alice);
