@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "forge-std/StdInvariant.sol";
+import "forge-std/StdStorage.sol";
 import "src/NavBNBv2.sol";
 
 contract ForceSend {
@@ -42,6 +43,9 @@ abstract contract NoLogBound is Test {
 }
 
 contract NavBNBv2Test is NoLogBound {
+    using stdStorage for StdStorage;
+
+    StdStorage internal stdstore;
     NavBNBv2 internal nav;
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
@@ -112,6 +116,44 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(nav.trackedAssetsBNB(), trackedBefore + amount);
         assertEq(address(nav).balance, navBalanceBefore - surplus);
         assertEq(recovery.balance - recoveryBalanceBefore, surplus);
+    }
+
+    function testNavNonZeroAtParity() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 capToday = nav.capRemainingToday();
+        uint256 desiredBnb = capToday + 1 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        uint256 liabilities = nav.totalLiabilitiesBNB();
+        assertGt(liabilities, 0);
+
+        stdstore.target(address(nav)).sig("trackedAssetsBNB()").checked_write(liabilities);
+        uint256 day = block.timestamp / 1 days;
+        uint256 capForDay = nav.capForDay(day);
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(capForDay);
+
+        uint256 navAfter = nav.nav();
+        assertGt(navAfter, 0);
+
+        vm.prank(bob);
+        nav.deposit{value: 1 ether}(0);
+
+        uint256 bobTokenAmount = nav.balanceOf(bob) / 2;
+        uint256 navAfterDeposit = nav.nav();
+        uint256 expectedBnbOwed = (bobTokenAmount * navAfterDeposit) / 1e18;
+        uint256 fee = (expectedBnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS();
+        uint256 expectedAfterFee = expectedBnbOwed - fee;
+
+        vm.prank(bob);
+        nav.redeem(bobTokenAmount, 0);
+
+        uint256 lastIndex = nav.queueLength() - 1;
+        (, uint256 queuedAmount) = nav.getQueueEntry(lastIndex);
+        assertEq(queuedAmount, expectedAfterFee);
     }
 
     function testClaimFairnessFifo() public {
@@ -194,6 +236,24 @@ contract NavBNBv2Test is NoLogBound {
         if (remainingLiabilities > 0) {
             fail(string(abi.encodePacked("remaining liabilities: ", vm.toString(remainingLiabilities))));
         }
+    }
+
+    function testCapIgnoresLiabilities() public {
+        vm.prank(alice);
+        nav.deposit{value: 100 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        uint256 capBefore = nav.capForDay(day);
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+
+        uint256 desiredBnb = 5 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        assertGt(nav.totalLiabilitiesBNB(), 0);
+        uint256 capAfter = nav.capForDay(day);
+        assertEq(capAfter, capBefore);
     }
 
     function testCapBehaviorAndNextDayClaim() public {
@@ -289,6 +349,7 @@ contract NavBNBv2Test is NoLogBound {
         assertGe(nav.balanceOf(alice), emergencyShares);
         assertGt(emergencyShares, 0);
         vm.prank(alice);
+        vm.expectRevert(NavBNBv2.QueueActive.selector);
         nav.emergencyRedeem(emergencyShares, 0);
 
         assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
@@ -310,11 +371,69 @@ contract NavBNBv2Test is NoLogBound {
         (, uint256 headRemainingBefore) = nav.getQueueEntry(head);
 
         vm.prank(alice);
+        vm.expectRevert(NavBNBv2.QueueActive.selector);
         nav.emergencyRedeem(1, 0);
 
         assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
         (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
         assertEq(headRemainingAfter, headRemainingBefore);
+    }
+
+    function testRedeemUsesCapToPayQueueHead() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 capToday = nav.capRemainingToday();
+        uint256 desiredBnb = capToday + 1 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        assertGt(nav.totalLiabilitiesBNB(), 0);
+        vm.warp(block.timestamp + 1 days);
+
+        uint256 aliceBalanceBefore = alice.balance;
+        uint256 bobBalanceBefore = bob.balance;
+
+        uint256 bobRedeem = nav.balanceOf(alice) / 10;
+        vm.prank(alice);
+        nav.transfer(bob, bobRedeem);
+        vm.prank(bob);
+        nav.redeem(bobRedeem, 0);
+
+        assertGt(alice.balance - aliceBalanceBefore, 0);
+        assertEq(bob.balance - bobBalanceBefore, 0);
+
+        uint256 lastIndex = nav.queueLength() - 1;
+        (, uint256 queuedAmount) = nav.getQueueEntry(lastIndex);
+        assertGt(queuedAmount, 0);
+    }
+
+    function testClaimBoundedSteps() public {
+        vm.prank(alice);
+        nav.deposit{value: 400 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+
+        for (uint256 i = 0; i < 40; i++) {
+            uint256 desiredAfterFee = 1 ether;
+            uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
+            uint256 tokenAmount = (bnbOwed * 1e18) / nav.nav();
+            vm.prank(alice);
+            nav.redeem(tokenAmount, 0);
+        }
+
+        assertGt(nav.totalLiabilitiesBNB(), 0);
+        vm.warp(block.timestamp + 1 days);
+
+        uint256 headBefore = nav.queueHead();
+        vm.prank(alice);
+        nav.claim();
+        uint256 headAfter = nav.queueHead();
+
+        assertEq(headAfter - headBefore, nav.DEFAULT_MAX_STEPS());
+        assertGt(nav.totalLiabilitiesBNB(), 0);
     }
 
     function testPauseBlocksDepositAndRedeem() public {
