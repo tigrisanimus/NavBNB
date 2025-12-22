@@ -553,6 +553,7 @@ contract NavBNBv2Test is NoLogBound {
         vm.deal(address(bad), 10 ether);
         bad.deposit{value: 5 ether}(0);
 
+        uint256 day = block.timestamp / 1 days;
         _setSpentToday(day, nav.capForDay(day));
 
         uint256 badTokens;
