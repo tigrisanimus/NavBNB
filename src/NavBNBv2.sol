@@ -9,7 +9,7 @@ contract NavBNBv2 {
     uint256 public constant BPS = 10_000;
     uint256 public constant MINT_FEE_BPS = 25;
     uint256 public constant REDEEM_FEE_BPS = 25;
-    uint256 public constant CAP_BPS = 100;
+    uint256 public constant CAP_BPS = 1_000;
     uint256 public constant EMERGENCY_FEE_BPS = 1_000;
 
     uint256 public totalSupply;
@@ -324,7 +324,7 @@ contract NavBNBv2 {
     }
 
     function _dayCap(uint256 day) internal view returns (uint256) {
-        uint256 assetsForCap = trackedAssetsBNB + totalLiabilitiesBNB + spentToday[day];
+        uint256 assetsForCap = trackedAssetsBNB + totalLiabilitiesBNB;
         return (assetsForCap * CAP_BPS) / BPS;
     }
 
