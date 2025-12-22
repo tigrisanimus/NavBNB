@@ -67,6 +67,8 @@ contract NavBNBv2 {
     error MintZero();
     error BnbSendFail();
     error QueueActive();
+    error InvalidRecipient();
+    error NoEquity();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -138,6 +140,14 @@ contract NavBNBv2 {
         if (totalSupply > 0 && trackedAssetsBNB <= _totalObligations()) {
             revert Insolvent();
         }
+        if (totalSupply == 0) {
+            if (_totalObligations() > 0) {
+                revert NoEquity();
+            }
+            if (trackedAssetsBNB > 0) {
+                _mint(recovery, trackedAssetsBNB);
+            }
+        }
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
         uint256 valueAfterFee = msg.value - fee;
         uint256 navBefore = nav();
@@ -171,8 +181,6 @@ contract NavBNBv2 {
         if (bnbAfterFee < minBnbOut) {
             revert Slippage();
         }
-
-        _burn(msg.sender, tokenAmount);
 
         uint256 bnbPaid;
         uint256 bnbQueued;
@@ -215,6 +223,7 @@ contract NavBNBv2 {
             }
         }
 
+        _burn(msg.sender, tokenAmount);
         emit Redeem(msg.sender, tokenAmount, bnbPaid, bnbQueued);
     }
 
@@ -258,7 +267,10 @@ contract NavBNBv2 {
         _initCapBase(_currentDay());
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
-        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS) / BPS;
+        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS + (BPS - 1)) / BPS;
+        if (fee > bnbOwed) {
+            fee = bnbOwed;
+        }
         uint256 bnbOut = bnbOwed - fee;
         if (bnbOut == 0) {
             revert Slippage();
@@ -266,20 +278,22 @@ contract NavBNBv2 {
         if (bnbOut < minBnbOut) {
             revert Slippage();
         }
-        _burn(msg.sender, tokenAmount);
-
         trackedAssetsBNB -= bnbOut;
         (bool success,) = msg.sender.call{value: bnbOut}("");
         if (!success) {
             revert BnbSendFail();
         }
 
+        _burn(msg.sender, tokenAmount);
         emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
     }
 
     function recoverSurplus(address to) external nonReentrant {
         if (msg.sender != recovery) {
             revert NotRecovery();
+        }
+        if (to == address(0) || to == address(this)) {
+            revert InvalidRecipient();
         }
         uint256 surplus = untrackedSurplusBNB();
         if (surplus == 0) {
@@ -405,15 +419,20 @@ contract NavBNBv2 {
             totalLiabilitiesBNB -= pay;
             (bool success,) = entry.user.call{value: pay}("");
             if (!success) {
-                claimableBNB[entry.user] += pay;
-                totalClaimableBNB += pay;
-                emit ClaimableCredited(entry.user, pay);
-                remainingLiquid -= pay;
-                if (entry.amount == 0) {
-                    head++;
-                    steps++;
+                uint256 credited = pay + entry.amount;
+                entry.amount = 0;
+                totalLiabilitiesBNB -= credited - pay;
+                claimableBNB[entry.user] += credited;
+                totalClaimableBNB += credited;
+                emit ClaimableCredited(entry.user, credited);
+                if (credited >= remainingLiquid) {
+                    remainingLiquid = 0;
+                } else {
+                    remainingLiquid -= credited;
                 }
-                break;
+                head++;
+                steps++;
+                continue;
             } else {
                 trackedAssetsBNB -= pay;
                 spentToday[day] += pay;
@@ -438,6 +457,27 @@ contract NavBNBv2 {
     function getQueueEntry(uint256 index) external view returns (address user, uint256 amount) {
         QueueEntry storage entry = queue[index];
         return (entry.user, entry.amount);
+    }
+
+    function compactQueue(uint256 maxMoves) external nonReentrant {
+        uint256 head = queueHead;
+        if (head == 0 || maxMoves == 0) {
+            return;
+        }
+        uint256 len = queue.length;
+        uint256 remaining = len - head;
+        if (maxMoves < remaining) {
+            return;
+        }
+        QueueEntry[] memory entries = new QueueEntry[](remaining);
+        for (uint256 i = 0; i < remaining; i++) {
+            entries[i] = queue[head + i];
+        }
+        delete queue;
+        for (uint256 i = 0; i < remaining; i++) {
+            queue.push(entries[i]);
+        }
+        queueHead = 0;
     }
 
     function withdrawClaimable(uint256 minOut) external nonReentrant whenNotPaused {
