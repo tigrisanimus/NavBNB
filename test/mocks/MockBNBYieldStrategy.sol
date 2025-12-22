@@ -21,4 +21,8 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
     function totalAssets() external view returns (uint256) {
         return stored;
     }
+
+    function setAssets(uint256 amount) external {
+        stored = amount;
+    }
 }

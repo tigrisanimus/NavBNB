@@ -155,6 +155,43 @@ contract NavBNBv2Test is NoLogBound {
         assertGt(mock.totalAssets(), 0);
     }
 
+    function testSetStrategyRevertsWhenCurrentStrategyNotEmpty() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        vm.prank(guardian);
+        nav.setStrategy(address(mock));
+
+        mock.setAssets(1 ether);
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
+        nav.setStrategy(address(0));
+    }
+
+    function testSetStrategyRevertsWhenNewStrategyNotEmpty() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        mock.setAssets(1 ether);
+
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
+        nav.setStrategy(address(mock));
+    }
+
+    function testSetStrategySucceedsWhenStrategiesEmpty() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mockNext = new MockBNBYieldStrategy();
+
+        vm.prank(guardian);
+        nav.setStrategy(address(mock));
+        assertEq(address(nav.strategy()), address(mock));
+
+        vm.prank(guardian);
+        nav.setStrategy(address(mockNext));
+        assertEq(address(nav.strategy()), address(mockNext));
+
+        vm.prank(guardian);
+        nav.setStrategy(address(0));
+        assertEq(address(nav.strategy()), address(0));
+    }
+
     function testDepositInvestsExcessAboveBuffer() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
         vm.prank(guardian);
