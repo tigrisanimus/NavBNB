@@ -453,7 +453,10 @@ contract NavBNBv2Test is NoLogBound {
             uint256 desiredAfterFee = 1 ether;
             uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
             uint256 tokenAmount = (bnbOwed * 1e18) / nav.nav();
+            address user = address(uint160(0x1000 + i));
             vm.prank(alice);
+            nav.transfer(user, tokenAmount);
+            vm.prank(user);
             nav.redeem(tokenAmount, 0);
         }
 
@@ -480,7 +483,10 @@ contract NavBNBv2Test is NoLogBound {
             uint256 desiredAfterFee = 1 ether;
             uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
             uint256 tokenAmount = (bnbOwed * 1e18) / nav.nav();
+            address user = address(uint160(0x1000 + i));
             vm.prank(alice);
+            nav.transfer(user, tokenAmount);
+            vm.prank(user);
             nav.redeem(tokenAmount, 0);
         }
 
