@@ -56,7 +56,7 @@ contract NavBNBv2 {
     event RecoverSurplus(address indexed to, uint256 amount);
     event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
     event ClaimableCredited(address indexed user, uint256 amount);
-    event StrategyUpdated(address indexed newStrategy);
+    event StrategyUpdated(address indexed oldStrategy, address indexed newStrategy);
     event LiquidityBufferUpdated(uint256 bps);
 
     error ZeroDeposit();
@@ -77,6 +77,7 @@ contract NavBNBv2 {
     error InvalidRecipient();
     error NoEquity();
     error StrategyNotEmpty();
+    error StrategyNotContract();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -145,18 +146,22 @@ contract NavBNBv2 {
         if (msg.sender != guardian) {
             revert NotGuardian();
         }
-        if (address(strategy) != address(0)) {
+        address oldStrategy = address(strategy);
+        if (oldStrategy != address(0)) {
             if (strategy.totalAssets() != 0) {
                 revert StrategyNotEmpty();
             }
         }
         if (newStrategy != address(0)) {
+            if (newStrategy.code.length == 0) {
+                revert StrategyNotContract();
+            }
             if (IBNBYieldStrategy(newStrategy).totalAssets() != 0) {
                 revert StrategyNotEmpty();
             }
         }
         strategy = IBNBYieldStrategy(newStrategy);
-        emit StrategyUpdated(newStrategy);
+        emit StrategyUpdated(oldStrategy, newStrategy);
     }
 
     function setLiquidityBufferBPS(uint256 newBps) external nonReentrant {
