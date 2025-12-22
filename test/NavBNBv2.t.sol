@@ -553,11 +553,7 @@ contract NavBNBv2Test is NoLogBound {
         vm.deal(address(bad), 10 ether);
         bad.deposit{value: 5 ether}(0);
 
-        uint256 capToday = nav.capRemainingToday();
-        uint256 bnbOwedForCap = (capToday * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
-        uint256 tokenAmountForCap = (bnbOwedForCap * 1e18) / nav.nav();
-        vm.prank(alice);
-        nav.redeem(tokenAmountForCap, 0);
+        _setSpentToday(day, nav.capForDay(day));
 
         uint256 badTokens;
         badTokens = nav.balanceOf(address(bad));
