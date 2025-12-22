@@ -200,13 +200,15 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.deposit{value: 100 ether}(0);
 
-        uint256 desiredBnb = 2 ether;
+        uint256 capToday = nav.capForDay(block.timestamp / 1 days);
+        uint256 desiredBnb = capToday + 1 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
         uint256 liabilities = nav.totalLiabilitiesBNB();
         assertGt(liabilities, 0);
+        assertEq(nav.capRemainingToday(), 0);
 
         uint256 balanceBefore = alice.balance;
         vm.prank(alice);
@@ -227,7 +229,8 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.deposit{value: 100 ether}(0);
 
-        uint256 desiredBnb = 2 ether;
+        uint256 capToday = nav.capForDay(block.timestamp / 1 days);
+        uint256 desiredBnb = capToday + 1 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
@@ -235,6 +238,7 @@ contract NavBNBv2Test is NoLogBound {
         uint256 liabilities = nav.totalLiabilitiesBNB();
         uint256 spent = nav.spentToday(block.timestamp / 1 days);
         assertGt(liabilities, 0);
+        assertEq(nav.capRemainingToday(), 0);
         uint256 head = nav.queueHead();
         (, uint256 headRemaining) = nav.getQueueEntry(head);
 
