@@ -135,7 +135,7 @@ contract NavBNBv2 {
         if (msg.value == 0) {
             revert ZeroDeposit();
         }
-        if (trackedAssetsBNB <= _totalObligations()) {
+        if (totalSupply > 0 && trackedAssetsBNB <= _totalObligations()) {
             revert Insolvent();
         }
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
