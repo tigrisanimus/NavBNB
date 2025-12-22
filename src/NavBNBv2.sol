@@ -409,6 +409,11 @@ contract NavBNBv2 {
                 totalClaimableBNB += pay;
                 emit ClaimableCredited(entry.user, pay);
                 remainingLiquid -= pay;
+                if (entry.amount == 0) {
+                    head++;
+                    steps++;
+                }
+                break;
             } else {
                 trackedAssetsBNB -= pay;
                 spentToday[day] += pay;

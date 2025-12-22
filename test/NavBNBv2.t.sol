@@ -556,8 +556,9 @@ contract NavBNBv2Test is NoLogBound {
         uint256 badTokens = nav.balanceOf(address(bad));
         bad.redeem(badTokens, 0);
 
+        uint256 aliceRedeem = nav.balanceOf(alice) / 10;
         vm.prank(alice);
-        nav.redeem(nav.balanceOf(alice) / 10, 0);
+        nav.redeem(aliceRedeem, 0);
 
         vm.warp(block.timestamp + 1 days);
         uint256 claimableBefore = nav.claimableBNB(address(bad));
