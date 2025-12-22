@@ -44,8 +44,6 @@ abstract contract NoLogBound is Test {
 
 contract NavBNBv2Test is NoLogBound {
     using stdStorage for StdStorage;
-
-    StdStorage internal stdstore;
     NavBNBv2 internal nav;
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
