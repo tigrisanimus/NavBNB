@@ -76,6 +76,7 @@ contract NavBNBv2 {
     error QueueActive();
     error InvalidRecipient();
     error NoEquity();
+    error StrategyNotEmpty();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -143,6 +144,16 @@ contract NavBNBv2 {
     function setStrategy(address newStrategy) external nonReentrant {
         if (msg.sender != guardian) {
             revert NotGuardian();
+        }
+        if (address(strategy) != address(0)) {
+            if (strategy.totalAssets() != 0) {
+                revert StrategyNotEmpty();
+            }
+        }
+        if (newStrategy != address(0)) {
+            if (IBNBYieldStrategy(newStrategy).totalAssets() != 0) {
+                revert StrategyNotEmpty();
+            }
         }
         strategy = IBNBYieldStrategy(newStrategy);
         emit StrategyUpdated(newStrategy);
