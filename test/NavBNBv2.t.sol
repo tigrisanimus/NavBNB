@@ -14,6 +14,37 @@ contract ForceSend {
     }
 }
 
+contract ToggleReceiver {
+    NavBNBv2 internal nav;
+    bool public shouldRevert;
+
+    constructor(NavBNBv2 nav_) {
+        nav = nav_;
+    }
+
+    function setRevert(bool value) external {
+        shouldRevert = value;
+    }
+
+    function deposit(uint256 minSharesOut) external payable {
+        nav.deposit{value: msg.value}(minSharesOut);
+    }
+
+    function redeem(uint256 tokenAmount, uint256 minBnbOut) external {
+        nav.redeem(tokenAmount, minBnbOut);
+    }
+
+    function withdrawClaimable(uint256 minOut) external {
+        nav.withdrawClaimable(minOut);
+    }
+
+    receive() external payable {
+        if (shouldRevert) {
+            revert("NO_RECEIVE");
+        }
+    }
+}
+
 abstract contract NoLogBound is Test {
     function bound(uint256 x, uint256 min, uint256 max) internal pure override returns (uint256 result) {
         return _bound(x, min, max);
@@ -136,6 +167,10 @@ contract NavBNBv2Test is NoLogBound {
 
         uint256 navAfter = nav.nav();
         assertGt(navAfter, 0);
+
+        vm.prank(bob);
+        vm.expectRevert(NavBNBv2.Insolvent.selector);
+        nav.redeem(1, 0);
 
         vm.prank(bob);
         nav.deposit{value: 1 ether}(0);
@@ -434,6 +469,35 @@ contract NavBNBv2Test is NoLogBound {
         assertGt(nav.totalLiabilitiesBNB(), 0);
     }
 
+    function testClaimBoundedStepsProgresses() public {
+        vm.prank(alice);
+        nav.deposit{value: 400 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+
+        for (uint256 i = 0; i < 40; i++) {
+            uint256 desiredAfterFee = 1 ether;
+            uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
+            uint256 tokenAmount = (bnbOwed * 1e18) / nav.nav();
+            vm.prank(alice);
+            nav.redeem(tokenAmount, 0);
+        }
+
+        vm.warp(block.timestamp + 1 days);
+        uint256 headBefore = nav.queueHead();
+        vm.prank(alice);
+        nav.claim();
+        uint256 headAfter = nav.queueHead();
+
+        vm.prank(alice);
+        nav.claim();
+        uint256 headAfterSecond = nav.queueHead();
+
+        assertEq(headAfter - headBefore, nav.DEFAULT_MAX_STEPS());
+        assertGt(headAfterSecond, headAfter);
+    }
+
     function testPauseBlocksDepositAndRedeem() public {
         vm.prank(guardian);
         nav.pause();
@@ -445,6 +509,126 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         vm.expectRevert(NavBNBv2.PausedError.selector);
         nav.redeem(1, 0);
+    }
+
+    function testEmergencyRedeemPausedReverts() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+        vm.prank(guardian);
+        nav.pause();
+
+        vm.prank(alice);
+        vm.expectRevert(NavBNBv2.PausedError.selector);
+        nav.emergencyRedeem(1, 0);
+    }
+
+    function testCapAccountingFromClaim() public {
+        vm.prank(alice);
+        nav.deposit{value: 20 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        uint256 desiredBnb = nav.capRemainingToday() + 1 ether;
+        uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        vm.warp(block.timestamp + 1 days);
+        uint256 capBefore = nav.capRemainingToday();
+        uint256 spentBefore = nav.spentToday(day + 1);
+
+        vm.prank(alice);
+        nav.claim();
+
+        uint256 spentAfter = nav.spentToday(day + 1);
+        uint256 capAfter = nav.capRemainingToday();
+        uint256 paid = spentAfter - spentBefore;
+
+        assertLe(paid, capBefore);
+        assertEq(capBefore - capAfter, paid);
+    }
+
+    function testQueueHeadRevertEscrowsAndMovesOn() public {
+        vm.prank(alice);
+        nav.deposit{value: 50 ether}(0);
+
+        ToggleReceiver bad = new ToggleReceiver(nav);
+        bad.setRevert(true);
+        vm.deal(address(bad), 10 ether);
+        bad.deposit{value: 5 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+
+        uint256 badTokens = nav.balanceOf(address(bad));
+        bad.redeem(badTokens, 0);
+
+        vm.prank(alice);
+        nav.redeem(nav.balanceOf(alice) / 10, 0);
+
+        vm.warp(block.timestamp + 1 days);
+        uint256 claimableBefore = nav.claimableBNB(address(bad));
+        vm.prank(alice);
+        nav.claim();
+
+        uint256 claimableAfter = nav.claimableBNB(address(bad));
+        assertGt(claimableAfter, claimableBefore);
+
+        uint256 head = nav.queueHead();
+        assertGt(head, 0);
+
+        uint256 aliceBalanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.claim();
+        assertGt(alice.balance - aliceBalanceBefore, 0);
+    }
+
+    function testWithdrawClaimablePaysOut() public {
+        vm.prank(alice);
+        nav.deposit{value: 20 ether}(0);
+
+        ToggleReceiver receiver = new ToggleReceiver(nav);
+        receiver.setRevert(true);
+        vm.deal(address(receiver), 5 ether);
+        receiver.deposit{value: 1 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+
+        receiver.redeem(nav.balanceOf(address(receiver)), 0);
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(alice);
+        nav.claim();
+
+        uint256 claimable = nav.claimableBNB(address(receiver));
+        assertGt(claimable, 0);
+
+        receiver.setRevert(false);
+        uint256 balanceBefore = address(receiver).balance;
+        receiver.withdrawClaimable(0);
+        uint256 balanceAfter = address(receiver).balance;
+
+        assertEq(balanceAfter - balanceBefore, claimable);
+        assertEq(nav.claimableBNB(address(receiver)), 0);
+    }
+
+    function testCoalesceQueueEntries() public {
+        vm.prank(alice);
+        nav.deposit{value: 20 ether}(0);
+
+        uint256 day = block.timestamp / 1 days;
+        stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(type(uint256).max);
+
+        uint256 desiredAfterFee = 1 ether;
+        uint256 bnbOwed = (desiredAfterFee * nav.BPS()) / (nav.BPS() - nav.REDEEM_FEE_BPS());
+        uint256 tokenAmount = (bnbOwed * 1e18) / nav.nav();
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+        vm.prank(alice);
+        nav.redeem(tokenAmount, 0);
+
+        uint256 len = nav.queueLength();
+        uint256 head = nav.queueHead();
+        assertEq(len - head, 1);
     }
 
     function testRecoverSurplusOnlyRecovery() public {
@@ -463,6 +647,10 @@ contract NavBNBv2HandlerTest is NoLogBound {
     mapping(address => bool) internal isParticipant;
 
     bool public overClaim;
+    bool public overCap;
+    bool public headDecreased;
+    bool public redeemBrokeSolvency;
+    uint256 public lastQueueHead;
 
     constructor(NavBNBv2 nav_, address[] memory users_) {
         nav = nav_;
@@ -476,6 +664,7 @@ contract NavBNBv2HandlerTest is NoLogBound {
         vm.prank(user);
         nav.deposit{value: amount}(0);
         _trackParticipant(user);
+        _trackQueueHead();
     }
 
     function redeem(uint256 userSeed, uint256 amountSeed) external {
@@ -484,10 +673,17 @@ contract NavBNBv2HandlerTest is NoLogBound {
         if (balance == 0) {
             return;
         }
+        if (nav.trackedAssetsBNB() <= nav.totalLiabilitiesBNB()) {
+            return;
+        }
         uint256 amount = bound(amountSeed, 1, balance);
         vm.prank(user);
         nav.redeem(amount, 0);
         _trackParticipant(user);
+        if (nav.trackedAssetsBNB() < nav.totalLiabilitiesBNB()) {
+            redeemBrokeSolvency = true;
+        }
+        _trackQueueHead();
     }
 
     function claim(uint256 userSeed) external {
@@ -496,6 +692,10 @@ contract NavBNBv2HandlerTest is NoLogBound {
         if (liabilitiesBefore == 0) {
             return;
         }
+        if (nav.trackedAssetsBNB() < liabilitiesBefore) {
+            return;
+        }
+        uint256 capRemaining = nav.capRemainingToday();
         uint256 beforeBalance = user.balance;
         vm.prank(user);
         nav.claim(1);
@@ -503,7 +703,13 @@ contract NavBNBv2HandlerTest is NoLogBound {
         if (afterBalance - beforeBalance > liabilitiesBefore) {
             overClaim = true;
         }
+        uint256 liabilitiesAfter = nav.totalLiabilitiesBNB();
+        uint256 paid = liabilitiesBefore - liabilitiesAfter;
+        if (paid > capRemaining) {
+            overCap = true;
+        }
         _trackParticipant(user);
+        _trackQueueHead();
     }
 
     function _trackParticipant(address user) internal {
@@ -511,6 +717,14 @@ contract NavBNBv2HandlerTest is NoLogBound {
             isParticipant[user] = true;
             participants.push(user);
         }
+    }
+
+    function _trackQueueHead() internal {
+        uint256 head = nav.queueHead();
+        if (head < lastQueueHead) {
+            headDecreased = true;
+        }
+        lastQueueHead = head;
     }
 
     function participantCount() external view returns (uint256) {
@@ -544,11 +758,30 @@ contract NavBNBv2InvariantTest is StdInvariant, Test {
             (, uint256 amount) = nav.getQueueEntry(i);
             sum += amount;
         }
-        assertEq(nav.totalLiabilitiesBNB(), sum);
+        uint256 claimableSum;
+        uint256 participants = handler.participantCount();
+        for (uint256 i = 0; i < participants; i++) {
+            address participant = handler.participants(i);
+            claimableSum += nav.claimableBNB(participant);
+        }
+        assertEq(nav.totalLiabilitiesBNB(), sum + claimableSum);
     }
 
     function invariantNoUserOverClaims() public view {
         assertFalse(handler.overClaim());
+    }
+
+    function invariantClaimWithinCap() public view {
+        assertFalse(handler.overCap());
+    }
+
+    function invariantQueueHeadMonotonic() public view {
+        assertFalse(handler.headDecreased());
+        assertLe(nav.queueHead(), nav.queueLength());
+    }
+
+    function invariantRedeemSolvent() public view {
+        assertFalse(handler.redeemBrokeSolvency());
     }
 
     function invariantTrackedAssetsBelowBalance() public view {

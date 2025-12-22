@@ -18,9 +18,11 @@ contract NavBNBv2 {
     mapping(address => mapping(address => uint256)) public allowance;
 
     uint256 public totalLiabilitiesBNB;
+    uint256 public totalClaimableBNB;
     mapping(uint256 => uint256) public spentToday;
 
     uint256 public trackedAssetsBNB;
+    mapping(address => uint256) public claimableBNB;
 
     address public immutable guardian;
     address public immutable recovery;
@@ -46,6 +48,7 @@ contract NavBNBv2 {
     event Unpaused(address indexed account);
     event RecoverSurplus(address indexed to, uint256 amount);
     event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
+    event ClaimableCredited(address indexed user, uint256 amount);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -149,7 +152,7 @@ contract NavBNBv2 {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
-        if (trackedAssetsBNB < totalLiabilitiesBNB) {
+        if (trackedAssetsBNB <= totalLiabilitiesBNB) {
             revert Insolvent();
         }
         uint256 currentNav = nav();
@@ -171,7 +174,7 @@ contract NavBNBv2 {
         uint256 capRemaining = _capRemaining(day);
 
         if (totalLiabilitiesBNB > 0) {
-            uint256 paidFromQueue = _payQueueHead(capRemaining, DEFAULT_MAX_STEPS);
+            uint256 paidFromQueue = _payQueueHead(day, capRemaining, DEFAULT_MAX_STEPS);
             capRemaining -= paidFromQueue;
             if (totalLiabilitiesBNB == 0 && capRemaining > 0) {
                 if (capRemaining >= bnbAfterFee) {
@@ -228,13 +231,13 @@ contract NavBNBv2 {
         if (capRemaining == 0) {
             return;
         }
-        uint256 totalPaid = _payQueueHead(capRemaining, maxSteps);
+        uint256 totalPaid = _payQueueHead(day, capRemaining, maxSteps);
         if (totalPaid > 0) {
             emit Claim(msg.sender, totalPaid);
         }
     }
 
-    function emergencyRedeem(uint256 tokenAmount, uint256 minBnbOut) external nonReentrant {
+    function emergencyRedeem(uint256 tokenAmount, uint256 minBnbOut) external nonReentrant whenNotPaused {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
@@ -296,10 +299,11 @@ contract NavBNBv2 {
 
     function untrackedSurplusBNB() public view returns (uint256) {
         uint256 balance = address(this).balance;
-        if (balance <= trackedAssetsBNB) {
+        uint256 reserved = trackedAssetsBNB + totalClaimableBNB;
+        if (balance <= reserved) {
             return 0;
         }
-        return balance - trackedAssetsBNB;
+        return balance - reserved;
     }
 
     function capForDay(uint256 day) external view returns (uint256) {
@@ -335,11 +339,19 @@ contract NavBNBv2 {
     }
 
     function _enqueue(address user, uint256 amount) internal {
+        if (queue.length > queueHead) {
+            QueueEntry storage lastEntry = queue[queue.length - 1];
+            if (lastEntry.user == user) {
+                lastEntry.amount += amount;
+                totalLiabilitiesBNB += amount;
+                return;
+            }
+        }
         queue.push(QueueEntry({user: user, amount: amount}));
         totalLiabilitiesBNB += amount;
     }
 
-    function _payQueueHead(uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid) {
+    function _payQueueHead(uint256 day, uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid) {
         if (maxAmount == 0 || totalLiabilitiesBNB == 0) {
             return 0;
         }
@@ -362,7 +374,10 @@ contract NavBNBv2 {
             trackedAssetsBNB -= pay;
             (bool success,) = entry.user.call{value: pay}("");
             if (!success) {
-                revert BnbSendFail();
+                claimableBNB[entry.user] += pay;
+                totalClaimableBNB += pay;
+                totalLiabilitiesBNB += pay;
+                emit ClaimableCredited(entry.user, pay);
             }
             if (entry.amount == 0) {
                 head++;
@@ -373,7 +388,7 @@ contract NavBNBv2 {
         }
         queueHead = head;
         if (paid > 0) {
-            spentToday[_currentDay()] += paid;
+            spentToday[day] += paid;
         }
     }
 
@@ -384,6 +399,25 @@ contract NavBNBv2 {
     function getQueueEntry(uint256 index) external view returns (address user, uint256 amount) {
         QueueEntry storage entry = queue[index];
         return (entry.user, entry.amount);
+    }
+
+    function withdrawClaimable(uint256 minOut) external nonReentrant whenNotPaused {
+        uint256 claimable = claimableBNB[msg.sender];
+        if (claimable == 0) {
+            return;
+        }
+        uint256 available = address(this).balance;
+        uint256 payout = claimable <= available ? claimable : available;
+        if (payout < minOut) {
+            revert Slippage();
+        }
+        claimableBNB[msg.sender] = claimable - payout;
+        totalClaimableBNB -= payout;
+        totalLiabilitiesBNB -= payout;
+        (bool success,) = msg.sender.call{value: payout}("");
+        if (!success) {
+            revert BnbSendFail();
+        }
     }
 
     function _transfer(address from, address to, uint256 amount) internal {
