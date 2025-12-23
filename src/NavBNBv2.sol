@@ -79,6 +79,8 @@ contract NavBNBv2 {
     error StrategyNotEmpty();
     error StrategyNotContract();
     error StrategyWithdrawFailed();
+    error InsufficientReserve();
+    error NoProgress();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -308,9 +310,6 @@ contract NavBNBv2 {
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
-        if (totalLiabilitiesBNB > 0) {
-            revert QueueActive();
-        }
         _initCapBase(_currentDay());
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
@@ -320,10 +319,13 @@ contract NavBNBv2 {
         }
         uint256 bnbOut = bnbOwed - fee;
         if (bnbOut == 0) {
-            revert Slippage();
+            revert NoProgress();
         }
         if (bnbOut < minBnbOut) {
             revert Slippage();
+        }
+        if (bnbOut > reserveBNB()) {
+            revert InsufficientReserve();
         }
         _ensureLiquidity(bnbOut);
         (bool success,) = msg.sender.call{value: bnbOut}("");
@@ -358,12 +360,17 @@ contract NavBNBv2 {
         return _navWithAssets(totalAssets());
     }
 
+    function totalObligations() public view returns (uint256) {
+        return _totalObligations();
+    }
+
     function reserveBNB() public view returns (uint256) {
         uint256 assets = totalAssets();
-        if (assets <= totalLiabilitiesBNB) {
+        uint256 obligations = _totalObligations();
+        if (assets <= obligations) {
             return 0;
         }
-        return assets - totalLiabilitiesBNB;
+        return assets - obligations;
     }
 
     function totalAssets() public view returns (uint256) {
