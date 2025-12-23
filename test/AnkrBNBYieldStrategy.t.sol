@@ -42,14 +42,16 @@ contract AnkrBNBYieldStrategyTest is Test {
         strategy.deposit{value: 10 ether}();
 
         assertEq(ankrBNB.balanceOf(address(strategy)), 10 ether);
-        assertEq(strategy.totalAssets(), 10 ether);
+        uint256 expected = (10 ether * (strategy.BPS() - strategy.valuationHaircutBps())) / strategy.BPS();
+        assertEq(strategy.totalAssets(), expected);
     }
 
     function testTotalAssetsTracksExchangeRatioYield() public {
         strategy.deposit{value: 10 ether}();
-        pool.setExchangeRatio((ONE * 9) / 10);
+        pool.setExchangeRatio((ONE * 11) / 10);
 
-        uint256 expected = (ankrBNB.balanceOf(address(strategy)) * ONE) / pool.exchangeRatio();
+        uint256 ratioValue = (ankrBNB.balanceOf(address(strategy)) * pool.exchangeRatio()) / ONE;
+        uint256 expected = (ratioValue * (strategy.BPS() - strategy.valuationHaircutBps())) / strategy.BPS();
         assertEq(strategy.totalAssets(), expected);
         assertGt(strategy.totalAssets(), 10 ether);
     }
@@ -110,7 +112,7 @@ contract AnkrBNBYieldStrategyTest is Test {
 
         vm.prank(guardian);
         vm.expectRevert(AnkrBNBYieldStrategy.SlippageTooHigh.selector);
-        strategy.setMaxSlippageBps(400);
+        strategy.setMaxSlippageBps(600);
 
         vm.prank(guardian);
         strategy.pause();
@@ -124,12 +126,12 @@ contract AnkrBNBYieldStrategyTest is Test {
 
     function testTotalAssetsAppliesValuationHaircut() public {
         strategy.deposit{value: 10 ether}();
-        pool.setExchangeRatio((ONE * 9) / 10);
+        pool.setExchangeRatio((ONE * 11) / 10);
 
         vm.prank(guardian);
         strategy.setValuationHaircutBps(500);
 
-        uint256 ratioValue = (ankrBNB.balanceOf(address(strategy)) * ONE) / pool.exchangeRatio();
+        uint256 ratioValue = (ankrBNB.balanceOf(address(strategy)) * pool.exchangeRatio()) / ONE;
         uint256 expected = (ratioValue * (strategy.BPS() - strategy.valuationHaircutBps())) / strategy.BPS();
         assertEq(strategy.totalAssets(), expected);
         assertLt(strategy.totalAssets(), ratioValue);
@@ -186,6 +188,18 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertEq(received, balanceAfter - balanceBefore);
         assertEq(strategy.totalAssets(), 0);
         assertEq(ankrBNB.balanceOf(address(strategy)), 0);
+    }
+
+    function testWithdrawClampsToHoldingsWhenRequestExceedsBalance() public {
+        strategy.deposit{value: 5 ether}();
+
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(10 ether);
+        uint256 balanceAfter = address(this).balance;
+
+        assertEq(received, balanceAfter - balanceBefore);
+        assertEq(received, 5 ether);
+        assertEq(strategy.totalAssets(), 0);
     }
 }
 

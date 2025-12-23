@@ -18,7 +18,7 @@ contract MockAnkrPool {
 
     function stakeCerts() external payable {
         require(msg.value > 0, "ZERO_STAKE");
-        uint256 mintAmount = (msg.value * exchangeRatio) / 1e18;
+        uint256 mintAmount = (msg.value * 1e18) / exchangeRatio;
         ankrBNB.mint(msg.sender, mintAmount);
     }
 }

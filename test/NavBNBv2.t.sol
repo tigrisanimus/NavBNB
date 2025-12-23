@@ -210,6 +210,58 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(address(nav.strategy()), address(0));
     }
 
+    function testStrategyTimelockActivation() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+
+        vm.prank(guardian);
+        nav.proposeStrategy(address(mock));
+
+        assertEq(nav.pendingStrategy(), address(mock));
+        uint256 activationTime = nav.strategyActivationTime();
+
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyTimelockNotExpired.selector);
+        nav.activateStrategy();
+
+        vm.warp(activationTime);
+        vm.prank(guardian);
+        nav.activateStrategy();
+
+        assertEq(address(nav.strategy()), address(mock));
+        assertEq(nav.pendingStrategy(), address(0));
+    }
+
+    function testActivateStrategyRevertsWhenCurrentNotEmpty() public {
+        MockBNBYieldStrategy current = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy next = new MockBNBYieldStrategy();
+
+        vm.prank(guardian);
+        nav.setStrategy(address(current));
+
+        current.setAssets(1 ether);
+
+        vm.prank(guardian);
+        nav.proposeStrategy(address(next));
+        vm.warp(nav.strategyActivationTime());
+
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
+        nav.activateStrategy();
+    }
+
+    function testActivateStrategyRevertsWhenNewNotEmpty() public {
+        MockBNBYieldStrategy next = new MockBNBYieldStrategy();
+        next.setAssets(1 ether);
+
+        vm.prank(guardian);
+        nav.proposeStrategy(address(next));
+        vm.warp(nav.strategyActivationTime());
+
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
+        nav.activateStrategy();
+    }
+
     function testDepositInvestsExcessAboveBuffer() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
         vm.prank(guardian);
