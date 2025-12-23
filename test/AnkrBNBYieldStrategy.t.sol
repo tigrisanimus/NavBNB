@@ -199,10 +199,9 @@ contract NavBNBv2StrategyWiringTest is Test {
         MockWBNB wbnb
     ) internal returns (AnkrBNBYieldStrategy) {
         vm.prank(vault);
-        return
-            new AnkrBNBYieldStrategy(
-                vault, guardian, address(pool), address(ankrBNB), address(router), address(wbnb), address(0xCAFE)
-            );
+        return new AnkrBNBYieldStrategy(
+            vault, guardian, address(pool), address(ankrBNB), address(router), address(wbnb), address(0xCAFE)
+        );
     }
 
     function testNavBNBv2CanSetAnkrStrategyWhenEmpty() public {
