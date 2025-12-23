@@ -32,7 +32,8 @@ interface IRouter {
 
 contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     uint256 public constant BPS = 10_000;
-    uint256 public constant MAX_SLIPPAGE_BPS = 300;
+    uint16 public constant MAX_SLIPPAGE_BPS = 300;
+    uint16 public constant MAX_VALUATION_HAIRCUT_BPS = 2_000;
     uint256 private constant ONE = 1e18;
 
     address public immutable vault;
@@ -42,23 +43,32 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     IRouter public immutable router;
     IWBNB public immutable wbnb;
 
-    uint256 public maxSlippageBps;
+    uint16 public maxSlippageBps;
+    uint16 public valuationHaircutBps;
     bool public paused;
+    address public recoveryAddress;
 
     event SlippageUpdated(uint256 oldBps, uint256 newBps);
+    event ValuationHaircutUpdated(uint256 oldBps, uint256 newBps);
     event Paused(address indexed account);
     event Unpaused(address indexed account);
     event EmergencyTokenRecovered(address indexed token, address indexed to, uint256 amount);
+    event RecoveryAddressUpdated(address indexed oldAddress, address indexed newAddress);
+    event WithdrawAllToVault(uint256 ankrSwapped, uint256 bnbOut);
 
     error NotVault();
     error NotGuardian();
     error PausedError();
+    error NotPaused();
     error SlippageTooHigh();
+    error ValuationHaircutTooHigh();
     error ZeroAmount();
     error BnbSendFail();
     error ApprovalFailed();
     error TransferFailed();
     error ZeroAddress();
+    error InvalidRecoveryToken();
+    error InvalidRecipient();
 
     modifier onlyVault() {
         if (msg.sender != vault) {
@@ -87,9 +97,10 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         address bnbStakingPool_,
         address ankrBNB_,
         address router_,
-        address wbnb_
+        address wbnb_,
+        address recovery_
     ) {
-        if (vault_ == address(0)) {
+        if (vault_ == address(0) || recovery_ == address(0)) {
             revert ZeroAddress();
         }
         guardian = guardian_;
@@ -99,6 +110,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         wbnb = IWBNB(wbnb_);
         vault = vault_;
         maxSlippageBps = 100;
+        recoveryAddress = recovery_;
     }
 
     receive() external payable {}
@@ -113,7 +125,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         emit Unpaused(msg.sender);
     }
 
-    function setMaxSlippageBps(uint256 newBps) external onlyGuardian {
+    function setMaxSlippageBps(uint16 newBps) external onlyGuardian {
         if (newBps > MAX_SLIPPAGE_BPS) {
             revert SlippageTooHigh();
         }
@@ -122,7 +134,34 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         emit SlippageUpdated(oldBps, newBps);
     }
 
+    function setValuationHaircutBps(uint16 newBps) external onlyGuardian {
+        if (newBps > MAX_VALUATION_HAIRCUT_BPS) {
+            revert ValuationHaircutTooHigh();
+        }
+        uint256 oldBps = valuationHaircutBps;
+        valuationHaircutBps = newBps;
+        emit ValuationHaircutUpdated(oldBps, newBps);
+    }
+
+    function setRecoveryAddress(address newRecovery) external onlyGuardian {
+        if (newRecovery == address(0)) {
+            revert ZeroAddress();
+        }
+        address oldRecovery = recoveryAddress;
+        recoveryAddress = newRecovery;
+        emit RecoveryAddressUpdated(oldRecovery, newRecovery);
+    }
+
     function recoverToken(address token, address to, uint256 amount) external onlyGuardian {
+        if (!paused) {
+            revert NotPaused();
+        }
+        if (token == address(0) || token == address(ankrBNB) || token == address(wbnb)) {
+            revert InvalidRecoveryToken();
+        }
+        if (to != vault && to != recoveryAddress) {
+            revert InvalidRecipient();
+        }
         if (!IERC20(token).transfer(to, amount)) {
             revert TransferFailed();
         }
@@ -157,9 +196,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         path[0] = address(ankrBNB);
         path[1] = address(wbnb);
 
-        uint256[] memory quote = router.getAmountsOut(ankrToSwap, path);
-        uint256 amountOutQuoted = quote[quote.length - 1];
-        uint256 amountOutMin = (amountOutQuoted * (BPS - maxSlippageBps)) / BPS;
+        uint256 amountOutMin = _minOut(ankrToSwap, ratio);
 
         _approve(ankrBNB, address(router), ankrToSwap);
         uint256[] memory amounts =
@@ -179,15 +216,57 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         return bnbOut;
     }
 
+    function withdrawAllToVault() external onlyVault returns (uint256 received) {
+        uint256 ankrBalance = ankrBNB.balanceOf(address(this));
+        uint256 ratio = _exchangeRatio();
+        if (ankrBalance > 0) {
+            address[] memory path = new address[](2);
+            path[0] = address(ankrBNB);
+            path[1] = address(wbnb);
+
+            uint256 amountOutMin = _minOut(ankrBalance, ratio);
+            _approve(ankrBNB, address(router), ankrBalance);
+            uint256[] memory amounts =
+                router.swapExactTokensForTokens(ankrBalance, amountOutMin, path, address(this), block.timestamp);
+            _approve(ankrBNB, address(router), 0);
+
+            uint256 wbnbOut = amounts[amounts.length - 1];
+            uint256 balanceBefore = address(this).balance;
+            wbnb.withdraw(wbnbOut);
+            uint256 bnbOut = address(this).balance - balanceBefore;
+            emit WithdrawAllToVault(ankrBalance, bnbOut);
+        }
+
+        uint256 totalBnb = address(this).balance;
+        if (totalBnb > 0) {
+            (bool success,) = vault.call{value: totalBnb}("");
+            if (!success) {
+                revert BnbSendFail();
+            }
+        }
+        return totalBnb;
+    }
+
     function totalAssets() external view returns (uint256) {
         uint256 ratio = _exchangeRatio();
         uint256 ankrBalance = ankrBNB.balanceOf(address(this));
         uint256 bnbValue = ratio == 0 ? 0 : (ankrBalance * ONE) / ratio;
-        return address(this).balance + bnbValue;
+        uint256 haircut = BPS - valuationHaircutBps;
+        uint256 adjusted = (bnbValue * haircut) / BPS;
+        return address(this).balance + adjusted;
     }
 
     function _exchangeRatio() internal view returns (uint256) {
         return stakingPool.exchangeRatio();
+    }
+
+    function _minOut(uint256 ankrAmount, uint256 ratio) internal view returns (uint256) {
+        if (ankrAmount == 0 || ratio == 0) {
+            return 0;
+        }
+        uint256 referenceValue = (ankrAmount * ONE) / ratio;
+        uint256 afterHaircut = (referenceValue * (BPS - valuationHaircutBps)) / BPS;
+        return (afterHaircut * (BPS - maxSlippageBps)) / BPS;
     }
 
     function _mulDivUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {

@@ -155,6 +155,24 @@ contract NavBNBv2Test is NoLogBound {
         assertGt(mock.totalAssets(), 0);
     }
 
+    function testStrategyWithdrawFailureSignalsAccurately() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        vm.prank(guardian);
+        nav.setStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        mock.setForceZeroWithdraw(true);
+
+        uint256 tokenAmount = nav.balanceOf(alice) / 2;
+        vm.prank(alice);
+        vm.expectRevert(NavBNBv2.StrategyWithdrawFailed.selector);
+        nav.redeem(tokenAmount, 0);
+    }
+
     function testSetStrategyRevertsWhenCurrentStrategyNotEmpty() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
         vm.prank(guardian);

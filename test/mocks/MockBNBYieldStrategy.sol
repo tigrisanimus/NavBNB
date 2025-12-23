@@ -5,14 +5,29 @@ import {IBNBYieldStrategy} from "src/IBNBYieldStrategy.sol";
 
 contract MockBNBYieldStrategy is IBNBYieldStrategy {
     uint256 internal stored;
+    bool internal forceZeroWithdraw;
 
     function deposit() external payable {
         stored += msg.value;
     }
 
     function withdraw(uint256 bnbAmount) external returns (uint256 received) {
+        if (forceZeroWithdraw && bnbAmount > 0) {
+            return 0;
+        }
         uint256 amount = bnbAmount > stored ? stored : bnbAmount;
         stored -= amount;
+        (bool success,) = msg.sender.call{value: amount}("");
+        require(success, "SEND_FAIL");
+        return amount;
+    }
+
+    function withdrawAllToVault() external returns (uint256 received) {
+        if (forceZeroWithdraw && stored > 0) {
+            return 0;
+        }
+        uint256 amount = stored;
+        stored = 0;
         (bool success,) = msg.sender.call{value: amount}("");
         require(success, "SEND_FAIL");
         return amount;
@@ -24,5 +39,9 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
 
     function setAssets(uint256 amount) external {
         stored = amount;
+    }
+
+    function setForceZeroWithdraw(bool value) external {
+        forceZeroWithdraw = value;
     }
 }
