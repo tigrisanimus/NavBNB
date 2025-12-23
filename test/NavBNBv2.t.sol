@@ -533,10 +533,15 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.deposit{value: 20 ether}(0);
 
+        vm.prank(bob);
+        nav.deposit{value: 5 ether}(0);
+
         uint256 desiredBnb = 5 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
+
+        assertGt(nav.reserveBNB(), 0);
 
         vm.prank(alice);
         nav.deposit{value: 5 ether}(0);
@@ -546,38 +551,59 @@ contract NavBNBv2Test is NoLogBound {
         (, uint256 headRemainingBefore) = nav.getQueueEntry(head);
         assertGt(liabilitiesBefore, 0);
 
-        uint256 emergencyShares = nav.balanceOf(alice) / 4;
-        assertGe(nav.balanceOf(alice), emergencyShares);
-        assertGt(emergencyShares, 0);
-        vm.prank(alice);
-        vm.expectRevert(NavBNBv2.QueueActive.selector);
+        uint256 emergencyShares = nav.balanceOf(bob) / 2;
+        uint256 bnbOwed = (emergencyShares * nav.nav()) / 1e18;
+        uint256 fee = (bnbOwed * nav.EMERGENCY_FEE_BPS() + (nav.BPS() - 1)) / nav.BPS();
+        if (fee > bnbOwed) {
+            fee = bnbOwed;
+        }
+        uint256 expected = bnbOwed - fee;
+
+        uint256 bobBalanceBefore = bob.balance;
+        vm.prank(bob);
         nav.emergencyRedeem(emergencyShares, 0);
+        uint256 bobBalanceAfter = bob.balance;
+
+        assertApproxEqAbs(bobBalanceAfter - bobBalanceBefore, expected, 2);
 
         assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
         (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
         assertEq(headRemainingAfter, headRemainingBefore);
+        assertGe(nav.totalAssets(), nav.totalObligations());
     }
 
-    function testEmergencyRedeemRejectsDustQueueClear() public {
+    function testEmergencyRedeemCannotDrainReserve() public {
         vm.prank(alice);
         nav.deposit{value: 10 ether}(0);
+
+        vm.prank(bob);
+        nav.deposit{value: 1 ether}(0);
 
         uint256 desiredBnb = 5 ether;
         uint256 tokenAmount = (desiredBnb * 1e18) / nav.nav();
         vm.prank(alice);
         nav.redeem(tokenAmount, 0);
 
-        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
-        uint256 head = nav.queueHead();
-        (, uint256 headRemainingBefore) = nav.getQueueEntry(head);
+        uint256 assets = nav.totalAssets();
+        uint256 liabilities = nav.totalLiabilitiesBNB();
+        uint256 claimableTarget = assets - liabilities;
+        stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(claimableTarget);
+        assertEq(nav.reserveBNB(), 0);
+        assertGt(nav.totalLiabilitiesBNB(), 0);
+
+        uint256 emergencyShares = nav.balanceOf(bob) / 2;
+        vm.prank(bob);
+        vm.expectRevert(NavBNBv2.NoProgress.selector);
+        nav.emergencyRedeem(emergencyShares, 0);
+    }
+
+    function testEmergencyRedeemRejectsNoProgress() public {
+        vm.prank(alice);
+        nav.deposit{value: 10}(0);
 
         vm.prank(alice);
-        vm.expectRevert(NavBNBv2.QueueActive.selector);
+        vm.expectRevert(NavBNBv2.NoProgress.selector);
         nav.emergencyRedeem(1, 0);
-
-        assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
-        (, uint256 headRemainingAfter) = nav.getQueueEntry(head);
-        assertEq(headRemainingAfter, headRemainingBefore);
     }
 
     function testRedeemUsesCapToPayQueueHead() public {
