@@ -266,7 +266,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (expectedBnb == 0) {
             return 0;
         }
-        return (expectedBnb * (BPS - maxSlippageBps)) / BPS;
+        uint256 afterHaircut = (expectedBnb * (BPS - valuationHaircutBps)) / BPS;
+        return (afterHaircut * (BPS - maxSlippageBps)) / BPS;
     }
 
     function _mulDivUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
