@@ -78,6 +78,7 @@ contract NavBNBv2 {
     error NoEquity();
     error StrategyNotEmpty();
     error StrategyNotContract();
+    error StrategyWithdrawFailed();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -607,7 +608,7 @@ contract NavBNBv2 {
         uint256 available = strategy.totalAssets();
         uint256 received = strategy.withdraw(shortfall);
         if (available > 0 && received == 0) {
-            revert Insolvent();
+            revert StrategyWithdrawFailed();
         }
     }
 
