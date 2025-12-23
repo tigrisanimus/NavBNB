@@ -34,6 +34,11 @@ contract NavBNBv2 {
     address public immutable guardian;
     address public immutable recovery;
 
+    uint32 public constant MAX_STRATEGY_TIMELOCK_SECONDS = 7 days;
+    address public pendingStrategy;
+    uint64 public strategyActivationTime;
+    uint32 public strategyTimelockSeconds;
+
     bool public paused;
     uint256 private locked;
 
@@ -57,6 +62,10 @@ contract NavBNBv2 {
     event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
     event ClaimableCredited(address indexed user, uint256 amount);
     event StrategyUpdated(address indexed oldStrategy, address indexed newStrategy);
+    event StrategyProposed(address indexed newStrategy, uint256 activationTime);
+    event StrategyActivated(address indexed newStrategy);
+    event StrategyProposalCancelled();
+    event StrategyTimelockUpdated(uint256 newSeconds);
     event LiquidityBufferUpdated(uint256 bps);
 
     error ZeroDeposit();
@@ -81,6 +90,10 @@ contract NavBNBv2 {
     error StrategyWithdrawFailed();
     error InsufficientReserve();
     error NoProgress();
+    error StrategyProposalMissing();
+    error StrategyTimelockNotExpired();
+    error StrategyTimelockTooLong();
+    error StrategyTimelockEnabled();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -102,6 +115,7 @@ contract NavBNBv2 {
         }
         guardian = guardian_;
         recovery = recovery_;
+        strategyTimelockSeconds = 1 days;
     }
 
     receive() external payable {}
@@ -149,22 +163,55 @@ contract NavBNBv2 {
         if (msg.sender != guardian) {
             revert NotGuardian();
         }
-        address oldStrategy = address(strategy);
-        if (oldStrategy != address(0)) {
-            if (strategy.totalAssets() != 0) {
-                revert StrategyNotEmpty();
-            }
+        if (strategyTimelockSeconds != 0) {
+            revert StrategyTimelockEnabled();
         }
-        if (newStrategy != address(0)) {
-            if (newStrategy.code.length == 0) {
-                revert StrategyNotContract();
-            }
-            if (IBNBYieldStrategy(newStrategy).totalAssets() != 0) {
-                revert StrategyNotEmpty();
-            }
+        _setStrategy(newStrategy);
+        _clearPendingStrategy();
+    }
+
+    function proposeStrategy(address newStrategy) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
         }
-        strategy = IBNBYieldStrategy(newStrategy);
-        emit StrategyUpdated(oldStrategy, newStrategy);
+        pendingStrategy = newStrategy;
+        strategyActivationTime = uint64(block.timestamp + strategyTimelockSeconds);
+        emit StrategyProposed(newStrategy, strategyActivationTime);
+    }
+
+    function activateStrategy() external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        if (strategyActivationTime == 0) {
+            revert StrategyProposalMissing();
+        }
+        if (block.timestamp < strategyActivationTime) {
+            revert StrategyTimelockNotExpired();
+        }
+        address newStrategy = pendingStrategy;
+        _setStrategy(newStrategy);
+        _clearPendingStrategy();
+        emit StrategyActivated(newStrategy);
+    }
+
+    function cancelStrategyProposal() external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        _clearPendingStrategy();
+        emit StrategyProposalCancelled();
+    }
+
+    function setStrategyTimelockSeconds(uint32 newSeconds) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        if (newSeconds > MAX_STRATEGY_TIMELOCK_SECONDS) {
+            revert StrategyTimelockTooLong();
+        }
+        strategyTimelockSeconds = newSeconds;
+        emit StrategyTimelockUpdated(newSeconds);
     }
 
     function setLiquidityBufferBPS(uint256 newBps) external nonReentrant {
@@ -630,6 +677,30 @@ contract NavBNBv2 {
         balanceOf[from] = bal - amount;
         balanceOf[to] += amount;
         emit Transfer(from, to, amount);
+    }
+
+    function _setStrategy(address newStrategy) internal {
+        address oldStrategy = address(strategy);
+        if (oldStrategy != address(0)) {
+            if (strategy.totalAssets() != 0) {
+                revert StrategyNotEmpty();
+            }
+        }
+        if (newStrategy != address(0)) {
+            if (newStrategy.code.length == 0) {
+                revert StrategyNotContract();
+            }
+            if (IBNBYieldStrategy(newStrategy).totalAssets() != 0) {
+                revert StrategyNotEmpty();
+            }
+        }
+        strategy = IBNBYieldStrategy(newStrategy);
+        emit StrategyUpdated(oldStrategy, newStrategy);
+    }
+
+    function _clearPendingStrategy() internal {
+        pendingStrategy = address(0);
+        strategyActivationTime = 0;
     }
 
     function _mint(address to, uint256 amount) internal {
