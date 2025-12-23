@@ -93,6 +93,7 @@ contract NavBNBv2 {
     error StrategyProposalMissing();
     error StrategyTimelockNotExpired();
     error StrategyTimelockTooLong();
+    error StrategyTimelockEnabled();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -162,6 +163,9 @@ contract NavBNBv2 {
         if (msg.sender != guardian) {
             revert NotGuardian();
         }
+        if (strategyTimelockSeconds != 0) {
+            revert StrategyTimelockEnabled();
+        }
         _setStrategy(newStrategy);
         _clearPendingStrategy();
     }
@@ -179,7 +183,7 @@ contract NavBNBv2 {
         if (msg.sender != guardian) {
             revert NotGuardian();
         }
-        if (pendingStrategy == address(0)) {
+        if (strategyActivationTime == 0) {
             revert StrategyProposalMissing();
         }
         if (block.timestamp < strategyActivationTime) {

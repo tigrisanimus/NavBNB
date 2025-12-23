@@ -87,6 +87,14 @@ contract NavBNBv2Test is NoLogBound {
         stdstore.target(address(nav)).sig("spentToday(uint256)").with_key(day).checked_write(value);
     }
 
+    function _activateStrategy(address newStrategy) internal {
+        vm.prank(guardian);
+        nav.proposeStrategy(newStrategy);
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        nav.activateStrategy();
+    }
+
     function testDepositSlippage() public {
         uint256 amount = 1 ether;
         uint256 fee = (amount * nav.MINT_FEE_BPS()) / nav.BPS();
@@ -144,8 +152,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testTotalAssetsIncludesStrategy() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
 
         vm.prank(alice);
         nav.deposit{value: 10 ether}(0);
@@ -157,8 +164,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testStrategyWithdrawFailureSignalsAccurately() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
 
@@ -175,13 +181,15 @@ contract NavBNBv2Test is NoLogBound {
 
     function testSetStrategyRevertsWhenCurrentStrategyNotEmpty() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
 
         mock.setAssets(1 ether);
         vm.prank(guardian);
+        nav.proposeStrategy(address(0));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
         vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
-        nav.setStrategy(address(0));
+        nav.activateStrategy();
     }
 
     function testSetStrategyRevertsWhenNewStrategyNotEmpty() public {
@@ -189,25 +197,33 @@ contract NavBNBv2Test is NoLogBound {
         mock.setAssets(1 ether);
 
         vm.prank(guardian);
+        nav.proposeStrategy(address(mock));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
         vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
-        nav.setStrategy(address(mock));
+        nav.activateStrategy();
     }
 
     function testSetStrategySucceedsWhenStrategiesEmpty() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
         MockBNBYieldStrategy mockNext = new MockBNBYieldStrategy();
 
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
         assertEq(address(nav.strategy()), address(mock));
 
-        vm.prank(guardian);
-        nav.setStrategy(address(mockNext));
+        _activateStrategy(address(mockNext));
         assertEq(address(nav.strategy()), address(mockNext));
 
-        vm.prank(guardian);
-        nav.setStrategy(address(0));
+        _activateStrategy(address(0));
         assertEq(address(nav.strategy()), address(0));
+    }
+
+    function testSetStrategyRevertsWhenTimelockEnabled() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyTimelockEnabled.selector);
+        nav.setStrategy(address(mock));
     }
 
     function testStrategyTimelockActivation() public {
@@ -235,8 +251,7 @@ contract NavBNBv2Test is NoLogBound {
         MockBNBYieldStrategy current = new MockBNBYieldStrategy();
         MockBNBYieldStrategy next = new MockBNBYieldStrategy();
 
-        vm.prank(guardian);
-        nav.setStrategy(address(current));
+        _activateStrategy(address(current));
 
         current.setAssets(1 ether);
 
@@ -264,8 +279,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testDepositInvestsExcessAboveBuffer() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(100);
 
@@ -279,8 +293,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testRedeemUsesStrategyToMeetLiquidNeedUnderCap() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(100);
 
@@ -304,8 +317,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testClaimUsesStrategyToMeetLiquidNeedUnderCap() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        vm.prank(guardian);
-        nav.setStrategy(address(mock));
+        _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
 

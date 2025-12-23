@@ -230,7 +230,10 @@ contract NavBNBv2StrategyWiringTest is Test {
         AnkrBNBYieldStrategy strategy = _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb);
 
         vm.prank(guardian);
-        nav.setStrategy(address(strategy));
+        nav.proposeStrategy(address(strategy));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        nav.activateStrategy();
         assertEq(address(nav.strategy()), address(strategy));
     }
 
@@ -246,7 +249,10 @@ contract NavBNBv2StrategyWiringTest is Test {
         AnkrBNBYieldStrategy strategy = _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb);
 
         vm.prank(guardian);
-        nav.setStrategy(address(strategy));
+        nav.proposeStrategy(address(strategy));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        nav.activateStrategy();
 
         wbnb.mint(address(router), 20 ether);
         vm.deal(address(wbnb), 20 ether);
@@ -267,7 +273,10 @@ contract NavBNBv2StrategyWiringTest is Test {
             _deployStrategyForVault(address(nav), guardian, poolNext, ankrBNBNext, routerNext, wbnbNext);
 
         vm.prank(guardian);
-        nav.setStrategy(address(nextStrategy));
+        nav.proposeStrategy(address(nextStrategy));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        nav.activateStrategy();
         assertEq(address(nav.strategy()), address(nextStrategy));
     }
 }
