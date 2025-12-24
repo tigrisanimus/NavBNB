@@ -6,6 +6,7 @@ import {NavBNBv2} from "src/NavBNBv2.sol";
 import {AnkrBNBYieldStrategy} from "src/strategies/AnkrBNBYieldStrategy.sol";
 import {MockAnkrPool} from "test/mocks/MockAnkrPool.sol";
 import {MockERC20, MockWBNB} from "test/mocks/MockERC20.sol";
+import {MockERC20NoReturn} from "test/mocks/MockERC20NoReturn.sol";
 import {MockRouter} from "test/mocks/MockRouter.sol";
 
 contract AnkrBNBYieldStrategyTest is Test {
@@ -200,6 +201,33 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertEq(received, balanceAfter - balanceBefore);
         assertEq(received, 5 ether);
         assertEq(strategy.totalAssets(), 0);
+    }
+
+    function testWithdrawSupportsApproveNoReturnToken() public {
+        MockERC20NoReturn noReturnToken = new MockERC20NoReturn("ankrBNB", "ankrBNB");
+        MockWBNB localWbnb = new MockWBNB();
+        MockAnkrPool localPool = new MockAnkrPool(address(noReturnToken), ONE);
+        MockRouter localRouter = new MockRouter(address(noReturnToken), address(localWbnb));
+        AnkrBNBYieldStrategy localStrategy = new AnkrBNBYieldStrategy(
+            address(this),
+            guardian,
+            address(localPool),
+            address(noReturnToken),
+            address(localRouter),
+            address(localWbnb),
+            recovery
+        );
+
+        localWbnb.mint(address(localRouter), 10 ether);
+        vm.deal(address(localWbnb), 10 ether);
+
+        localStrategy.deposit{value: 5 ether}();
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = localStrategy.withdraw(1 ether);
+        uint256 balanceAfter = address(this).balance;
+
+        assertEq(received, balanceAfter - balanceBefore);
+        assertGt(received, 0);
     }
 }
 

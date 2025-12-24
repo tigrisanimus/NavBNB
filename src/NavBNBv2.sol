@@ -94,6 +94,7 @@ contract NavBNBv2 {
     error StrategyNotEmpty();
     error StrategyNotContract();
     error StrategyWithdrawFailed();
+    error InsufficientLiquidityAfterWithdraw();
     error InsufficientReserve();
     error NoProgress();
     error StrategyProposalMissing();
@@ -198,6 +199,9 @@ contract NavBNBv2 {
             revert StrategyTimelockNotExpired();
         }
         address newStrategy = pendingStrategy;
+        if (newStrategy != address(0) && newStrategy.code.length == 0) {
+            revert StrategyNotContract();
+        }
         _setStrategy(newStrategy);
         _clearPendingStrategy();
         emit StrategyActivated(newStrategy);
@@ -379,7 +383,13 @@ contract NavBNBv2 {
         }
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
-        uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS + (BPS - 1)) / BPS;
+        uint256 quotient = bnbOwed / BPS;
+        uint256 remainder = bnbOwed % BPS;
+        uint256 fee = quotient * EMERGENCY_FEE_BPS;
+        uint256 remainderFee = remainder * EMERGENCY_FEE_BPS;
+        if (remainderFee != 0) {
+            fee += (remainderFee + BPS - 1) / BPS;
+        }
         if (fee > bnbOwed) {
             fee = bnbOwed;
         }
@@ -533,14 +543,6 @@ contract NavBNBv2 {
     }
 
     function _enqueue(address user, uint256 amount) internal {
-        if (queue.length > queueHead) {
-            QueueEntry storage lastEntry = queue[queue.length - 1];
-            if (lastEntry.user == user) {
-                lastEntry.amount += amount;
-                totalLiabilitiesBNB += amount;
-                return;
-            }
-        }
         queue.push(QueueEntry({user: user, amount: amount}));
         totalLiabilitiesBNB += amount;
     }
@@ -662,15 +664,14 @@ contract NavBNBv2 {
         if (payout > liquidAvailable) {
             payout = liquidAvailable;
         }
-        if (payout < minOut) {
-            revert Slippage();
-        }
         if (payout == 0) {
             revert NoProgress();
         }
+        if (payout < minOut) {
+            revert Slippage();
+        }
         claimableBNB[msg.sender] = claimable - payout;
         totalClaimableBNB -= payout;
-        _ensureLiquidity(payout);
         (bool success,) = msg.sender.call{value: payout}("");
         if (!success) {
             revert BnbSendFail();
@@ -713,9 +714,15 @@ contract NavBNBv2 {
         }
         uint256 shortfall = needed - balance;
         uint256 available = strategy.totalAssets();
+        if (available < shortfall) {
+            shortfall = available;
+        }
         uint256 received = strategy.withdraw(shortfall);
         if (available > 0 && received == 0) {
             revert StrategyWithdrawFailed();
+        }
+        if (address(this).balance < needed) {
+            revert InsufficientLiquidityAfterWithdraw();
         }
     }
 

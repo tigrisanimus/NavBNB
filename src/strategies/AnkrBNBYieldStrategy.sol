@@ -276,7 +276,9 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     }
 
     function _approve(IERC20 token, address spender, uint256 amount) internal {
-        if (!token.approve(spender, amount)) {
+        (bool success, bytes memory data) =
+            address(token).call(abi.encodeWithSelector(token.approve.selector, spender, amount));
+        if (!success || (data.length != 0 && !abi.decode(data, (bool)))) {
             revert ApprovalFailed();
         }
     }
