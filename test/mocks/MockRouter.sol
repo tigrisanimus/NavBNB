@@ -8,6 +8,9 @@ contract MockRouter {
     MockERC20 public immutable wbnb;
     uint256 public rate;
     uint256 public liquidityOut;
+    uint256 public swapCallCount;
+    uint256 public lastDeadline;
+    uint256 public lastAmountIn;
 
     constructor(address ankrBNB_, address wbnb_) {
         ankrBNB = MockERC20(ankrBNB_);
@@ -35,9 +38,13 @@ contract MockRouter {
         uint256 amountOutMin,
         address[] calldata path,
         address to,
-        uint256
+        uint256 deadline
     ) external returns (uint256[] memory amounts) {
         require(path.length == 2, "PATH");
+        require(deadline >= block.timestamp, "DEADLINE");
+        swapCallCount += 1;
+        lastDeadline = deadline;
+        lastAmountIn = amountIn;
         uint256 expectedOut = (amountIn * rate) / 1e18;
         uint256 available = wbnb.balanceOf(address(this));
         if (liquidityOut != 0 && liquidityOut < available) {

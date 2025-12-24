@@ -9,7 +9,6 @@ contract NavBNB {
     uint256 public constant BPS = 10_000;
     uint256 public constant MINT_FEE_BPS = 25;
     uint256 public constant REDEEM_FEE_BPS = 25;
-    uint256 public constant CAP_BPS = 100;
     uint256 public constant EMERGENCY_FEE_BPS = 1_000;
 
     uint256 public totalSupply;
@@ -18,7 +17,6 @@ contract NavBNB {
 
     mapping(address => uint256) public userOwedBNB;
     uint256 public queuedTotalOwedBNB;
-    mapping(uint256 => uint256) public spentToday;
 
     uint256 private locked;
 
@@ -91,16 +89,7 @@ contract NavBNB {
         uint256 bnbAfterFee = bnbOwed - fee;
         require(bnbAfterFee > 0, "ROUNDING");
 
-        uint256 day = _currentDay();
-        uint256 cap = _dayCap();
-        uint256 spent = spentToday[day];
-        uint256 capRemaining = cap > spent ? cap - spent : 0;
-        uint256 available = capRemaining;
-        uint256 balance = address(this).balance;
-        if (available > balance) {
-            available = balance;
-        }
-        require(available > 0, "CAP_REACHED");
+        uint256 available = reserveBNB();
 
         uint256 bnbPaid;
         uint256 bnbQueued;
@@ -115,7 +104,6 @@ contract NavBNB {
 
         _burn(msg.sender, tokenAmount);
 
-        spentToday[day] = spent + bnbPaid;
         if (bnbQueued > 0) {
             userOwedBNB[msg.sender] += bnbQueued;
             queuedTotalOwedBNB += bnbQueued;
@@ -132,16 +120,8 @@ contract NavBNB {
     function claim() external nonReentrant {
         uint256 owed = userOwedBNB[msg.sender];
         require(owed > 0, "NOTHING_OWED");
-        uint256 day = _currentDay();
-        uint256 cap = _dayCap();
-        uint256 spent = spentToday[day];
-        uint256 capRemaining = cap > spent ? cap - spent : 0;
-        uint256 available = capRemaining;
-        uint256 balance = address(this).balance;
-        if (available > balance) {
-            available = balance;
-        }
-        require(available > 0, "CAP_REACHED");
+        uint256 available = address(this).balance;
+        require(available > 0, "INSUFFICIENT_LIQUIDITY");
 
         uint256 payout;
         if (available >= queuedTotalOwedBNB) {
@@ -153,8 +133,6 @@ contract NavBNB {
 
         userOwedBNB[msg.sender] = owed - payout;
         queuedTotalOwedBNB -= payout;
-        spentToday[day] = spent + payout;
-
         (bool success,) = msg.sender.call{value: payout}("");
         require(success, "BNB_SEND_FAIL");
 
@@ -194,15 +172,6 @@ contract NavBNB {
         return address(this).balance - queuedTotalOwedBNB;
     }
 
-    function capForDay(uint256 day) external view returns (uint256) {
-        day;
-        return (totalAssetsBNB() * CAP_BPS) / BPS;
-    }
-
-    function _dayCap() internal view returns (uint256 cap) {
-        cap = (totalAssetsBNB() * CAP_BPS) / BPS;
-    }
-
     function emergencyRedeem(uint256 tokenAmount) external nonReentrant {
         require(tokenAmount > 0, "ZERO_REDEEM");
         uint256 owed = userOwedBNB[msg.sender];
@@ -225,10 +194,6 @@ contract NavBNB {
         require(success, "BNB_SEND_FAIL");
 
         emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
-    }
-
-    function _currentDay() internal view returns (uint256) {
-        return block.timestamp / 1 days;
     }
 
     function _transfer(address from, address to, uint256 amount) internal {
