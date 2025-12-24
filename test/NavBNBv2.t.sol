@@ -40,6 +40,14 @@ contract ToggleReceiver {
     }
 }
 
+contract ForceSend {
+    constructor() payable {}
+
+    function boom(address payable target) external {
+        selfdestruct(target);
+    }
+}
+
 abstract contract NoLogBound is Test {
     function bound(uint256 x, uint256 min, uint256 max) internal pure override returns (uint256 result) {
         return _bound(x, min, max);
@@ -111,6 +119,9 @@ contract NavBNBv2Test is NoLogBound {
         if (fee > bnbOwed) {
             fee = bnbOwed;
         }
+        if (bnbOwed > 0 && fee >= bnbOwed) {
+            fee = bnbOwed - 1;
+        }
         return fee;
     }
 
@@ -173,7 +184,8 @@ contract NavBNBv2Test is NoLogBound {
         nav.deposit{value: 10 ether}(0);
         uint256 navBefore = nav.nav();
 
-        vm.deal(address(nav), address(nav).balance + 1 ether);
+        ForceSend force = new ForceSend{value: 1 ether}();
+        force.boom(payable(address(nav)));
 
         assertGt(nav.nav(), navBefore);
         assertGt(nav.totalAssets(), 10 ether);
@@ -181,21 +193,19 @@ contract NavBNBv2Test is NoLogBound {
         uint256 amount = 1 ether;
         uint256 fee = (amount * nav.MINT_FEE_BPS()) / nav.BPS();
         uint256 valueAfterFee = amount - fee;
-        uint256 expectedMint = (valueAfterFee * 1e18) / nav.nav();
+        uint256 navAtTracked = (nav.trackedAssetsBNB() * 1e18) / nav.totalSupply();
+        uint256 expectedMint = (valueAfterFee * 1e18) / navAtTracked;
 
+        uint256 recoveryBefore = nav.balanceOf(recovery);
         vm.prank(bob);
         nav.deposit{value: amount}(expectedMint);
         assertEq(nav.balanceOf(bob), expectedMint);
+        assertGt(nav.balanceOf(recovery), recoveryBefore);
 
-        uint256 surplus = nav.untrackedSurplusBNB();
-        uint256 recoveryBalanceBefore = recovery.balance;
-        uint256 navBalanceBefore = address(nav).balance;
-        vm.prank(recovery);
-        nav.recoverSurplus(recovery);
+        uint256 bobValue = (nav.balanceOf(bob) * nav.nav()) / 1e18;
+        assertApproxEqAbs(bobValue, valueAfterFee, 1e15);
 
-        assertEq(nav.totalAssets(), navBalanceBefore - surplus);
-        assertEq(address(nav).balance, navBalanceBefore - surplus);
-        assertEq(recovery.balance - recoveryBalanceBefore, surplus);
+        assertEq(nav.untrackedSurplusBNB(), 0);
     }
 
     function testTotalAssetsIncludesStrategy() public {
@@ -288,6 +298,24 @@ contract NavBNBv2Test is NoLogBound {
 
         _activateStrategy(address(0));
         assertEq(address(nav.strategy()), address(0));
+    }
+
+    function testStrategyMigrationUpdatesTrackedAssets() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        mock.setAssets(12 ether);
+        vm.deal(address(mock), 12 ether);
+
+        _activateStrategy(address(0));
+
+        assertEq(nav.trackedAssetsBNB(), nav.totalAssets());
+        assertEq(nav.untrackedSurplusBNB(), 0);
     }
 
     function testSetStrategyRevertsWhenTimelockEnabled() public {
@@ -421,6 +449,28 @@ contract NavBNBv2Test is NoLogBound {
 
         assertGt(balanceAfter - balanceBefore, 0);
         assertLe(mock.totalAssets(), strategyBefore);
+    }
+
+    function testClaimBestEffortPaysPartialStrategyWithdraw() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+        mock.setWithdrawRatioBps(9_000);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        _seedQueue(alice, 1, 1 ether);
+
+        uint256 balanceBefore = alice.balance;
+        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
+        vm.prank(alice);
+        nav.claim();
+        uint256 balanceAfter = alice.balance;
+
+        assertGt(balanceAfter - balanceBefore, 0);
+        assertLt(nav.totalLiabilitiesBNB(), liabilitiesBefore);
     }
 
     function testQueuePaymentsRespectClaimableReserve() public {
@@ -648,6 +698,44 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(nav.exitFeeBps(alice), 0);
     }
 
+    function testExitFeeTransfersWithFullShares() public {
+        _setExitFeeConfig(0, 1 days, 500);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 tokenAmount = nav.balanceOf(alice);
+        vm.prank(alice);
+        nav.transfer(bob, tokenAmount);
+
+        uint256 bnbOwed = (tokenAmount * nav.nav()) / 1e18;
+        uint256 fee = (bnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS();
+        uint256 timeFeeBps = nav.exitFeeBps(bob);
+        uint256 timeFee = ((bnbOwed - fee) * timeFeeBps) / nav.BPS();
+        uint256 expected = bnbOwed - fee - timeFee;
+
+        uint256 balanceBefore = bob.balance;
+        vm.prank(bob);
+        nav.redeem(tokenAmount, 0);
+        uint256 balanceAfter = bob.balance;
+
+        assertApproxEqAbs(balanceAfter - balanceBefore, expected, 2);
+    }
+
+    function testExitFeeTransfersOnPartialShares() public {
+        _setExitFeeConfig(0, 1 days, 500);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 tokenAmount = nav.balanceOf(alice) / 2;
+        vm.prank(alice);
+        nav.transfer(bob, tokenAmount);
+
+        assertEq(nav.exitFeeBps(bob), nav.exitFeeBps(alice));
+        assertGt(nav.exitFeeBps(bob), 0);
+    }
+
     function testDefaultExitFeeConfigDecaysToZero() public {
         NavBNBv2 localNav = new NavBNBv2(guardian, recovery);
         vm.deal(alice, 100 ether);
@@ -798,13 +886,16 @@ contract NavBNBv2Test is NoLogBound {
         nav.emergencyRedeem(emergencyShares, 0);
     }
 
-    function testEmergencyRedeemRejectsNoProgress() public {
+    function testEmergencyRedeemReturnsAtLeastOneWei() public {
         vm.prank(alice);
         nav.deposit{value: 10}(0);
 
+        uint256 balanceBefore = alice.balance;
         vm.prank(alice);
-        vm.expectRevert(NavBNBv2.NoProgress.selector);
         nav.emergencyRedeem(1, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, 1);
     }
 
     function testRedeemPaysQueueBeforeNewRedemption() public {
@@ -915,7 +1006,7 @@ contract NavBNBv2Test is NoLogBound {
         nav.emergencyRedeem(1, 0);
     }
 
-    function testWithdrawClaimableRevertsWhenStrategyPartial() public {
+    function testWithdrawClaimablePaysPartialWhenStrategyPartial() public {
         MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
@@ -927,12 +1018,14 @@ contract NavBNBv2Test is NoLogBound {
         stdstore.target(address(nav)).sig("claimableBNB(address)").with_key(alice).checked_write(2 ether);
         stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(2 ether);
 
+        uint256 balanceBefore = alice.balance;
         vm.prank(alice);
-        vm.expectRevert(NavBNBv2.InsufficientLiquidityAfterWithdraw.selector);
         nav.withdrawClaimable(0);
+        uint256 balanceAfter = alice.balance;
 
-        assertEq(nav.claimableBNB(alice), 2 ether);
-        assertEq(nav.totalClaimableBNB(), 2 ether);
+        assertEq(balanceAfter - balanceBefore, 1 ether);
+        assertEq(nav.claimableBNB(alice), 1 ether);
+        assertEq(nav.totalClaimableBNB(), 1 ether);
     }
 
     function testQueueHeadRevertEscrowsAndMovesOn() public {

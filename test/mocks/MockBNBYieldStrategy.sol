@@ -4,10 +4,12 @@ pragma solidity ^0.8.30;
 import {IBNBYieldStrategy} from "src/IBNBYieldStrategy.sol";
 
 contract MockBNBYieldStrategy is IBNBYieldStrategy {
+    uint256 internal constant BPS = 10_000;
     uint256 internal stored;
     bool internal forceZeroWithdraw;
     uint256 internal maxWithdraw;
     uint256 internal withdrawCalls;
+    uint256 internal withdrawRatioBps;
 
     function deposit() external payable {
         stored += msg.value;
@@ -21,6 +23,9 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
         uint256 amount = bnbAmount > stored ? stored : bnbAmount;
         if (maxWithdraw != 0 && amount > maxWithdraw) {
             amount = maxWithdraw;
+        }
+        if (withdrawRatioBps != 0) {
+            amount = (amount * withdrawRatioBps) / BPS;
         }
         stored -= amount;
         (bool success,) = msg.sender.call{value: amount}("");
@@ -57,5 +62,9 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
 
     function setMaxWithdraw(uint256 amount) external {
         maxWithdraw = amount;
+    }
+
+    function setWithdrawRatioBps(uint256 bps) external {
+        withdrawRatioBps = bps;
     }
 }
