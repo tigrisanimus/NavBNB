@@ -276,7 +276,8 @@ contract NavBNBv2 {
         if (totalSupply > 0 && assetsBefore <= _totalObligations()) {
             revert Insolvent();
         }
-        if (totalSupply == 0) {
+        bool wasZeroSupply = totalSupply == 0;
+        if (wasZeroSupply) {
             if (_totalObligations() > 0) {
                 revert NoEquity();
             }
@@ -285,9 +286,20 @@ contract NavBNBv2 {
                 _mint(recovery, assetsBefore);
             }
         }
+        if (!wasZeroSupply && assetsBefore > trackedAssetsBNB) {
+            uint256 surplus = assetsBefore - trackedAssetsBNB;
+            uint256 navAtTracked = _navWithAssets(trackedAssetsBNB);
+            if (navAtTracked == 0) {
+                navAtTracked = _navWithAssets(assetsBefore);
+            }
+            uint256 surplusShares = (surplus * 1e18) / navAtTracked;
+            if (surplusShares > 0) {
+                _mint(recovery, surplusShares);
+            }
+        }
+        uint256 navBefore = _navWithAssets(assetsBefore);
         uint256 fee = (msg.value * MINT_FEE_BPS) / BPS;
         uint256 valueAfterFee = msg.value - fee;
-        uint256 navBefore = _navWithAssets(assetsBefore);
         uint256 minted = (valueAfterFee * 1e18) / navBefore;
         if (minted < minSharesOut) {
             revert Slippage();
@@ -335,7 +347,7 @@ contract NavBNBv2 {
         if (totalLiabilitiesBNB > 0) {
             bnbQueued = bnbAfterFee;
         } else {
-            _ensureLiquidity(bnbAfterFee);
+            _ensureLiquidityBestEffort(bnbAfterFee);
             uint256 liquidAvailable = _redeemableBalance();
             if (liquidAvailable >= bnbAfterFee) {
                 bnbPaid = bnbAfterFee;
@@ -350,7 +362,7 @@ contract NavBNBv2 {
         }
 
         if (bnbPaid > 0) {
-            _ensureLiquidity(bnbPaid);
+            _ensureLiquidityBestEffort(bnbPaid);
             (bool success,) = msg.sender.call{value: bnbPaid}("");
             if (!success) {
                 revert BnbSendFail();
@@ -405,6 +417,9 @@ contract NavBNBv2 {
         if (fee > bnbOwed) {
             fee = bnbOwed;
         }
+        if (bnbOwed > 0 && fee >= bnbOwed) {
+            fee = bnbOwed - 1;
+        }
         uint256 bnbOut = bnbOwed - fee;
         if (bnbOut == 0) {
             revert NoProgress();
@@ -415,7 +430,7 @@ contract NavBNBv2 {
         if (bnbOut > reserveBNB()) {
             revert InsufficientReserve();
         }
-        _ensureLiquidity(bnbOut);
+        _ensureLiquidityExact(bnbOut);
         (bool success,) = msg.sender.call{value: bnbOut}("");
         if (!success) {
             revert BnbSendFail();
@@ -525,7 +540,7 @@ contract NavBNBv2 {
             remainingCap = totalLiabilitiesBNB;
         }
         uint256 payBudget = remainingCap;
-        _ensureLiquidity(payBudget);
+        _ensureLiquidityBestEffort(payBudget);
         uint256 remainingLiquid = _redeemableBalance();
         if (remainingLiquid > remainingCap) {
             remainingLiquid = remainingCap;
@@ -644,7 +659,7 @@ contract NavBNBv2 {
         if (payout == 0) {
             revert NoProgress();
         }
-        _ensureLiquidity(payout);
+        _ensureLiquidityBestEffort(payout);
         uint256 liquidAvailable = address(this).balance;
         if (payout > liquidAvailable) {
             payout = liquidAvailable;
@@ -689,7 +704,7 @@ contract NavBNBv2 {
         }
     }
 
-    function _ensureLiquidity(uint256 needed) internal {
+    function _ensureLiquidityExact(uint256 needed) internal {
         if (needed == 0 || address(strategy) == address(0)) {
             return;
         }
@@ -712,6 +727,26 @@ contract NavBNBv2 {
         }
     }
 
+    function _ensureLiquidityBestEffort(uint256 target) internal {
+        if (target == 0 || address(strategy) == address(0)) {
+            return;
+        }
+        uint256 balance = address(this).balance;
+        if (balance >= target) {
+            return;
+        }
+        uint256 shortfall = target - balance;
+        uint256 available = strategy.totalAssets();
+        uint256 withdrawAmount = shortfall > available ? available : shortfall;
+        if (withdrawAmount == 0) {
+            return;
+        }
+        uint256 received = strategy.withdraw(withdrawAmount);
+        if (available > 0 && received == 0) {
+            revert StrategyWithdrawFailed();
+        }
+    }
+
     function _transfer(address from, address to, uint256 amount) internal {
         if (to == address(0)) {
             revert TransferZero();
@@ -722,6 +757,13 @@ contract NavBNBv2 {
         }
         balanceOf[from] = bal - amount;
         balanceOf[to] += amount;
+        if (amount > 0) {
+            uint64 fromLastDeposit = lastDepositTime[from];
+            uint64 toLastDeposit = lastDepositTime[to];
+            if (fromLastDeposit > toLastDeposit) {
+                lastDepositTime[to] = fromLastDeposit;
+            }
+        }
         emit Transfer(from, to, amount);
     }
 
@@ -738,6 +780,7 @@ contract NavBNBv2 {
             _requireStrategyEmpty(newStrategy);
         }
         strategy = IBNBYieldStrategy(newStrategy);
+        trackedAssetsBNB = totalAssets();
         emit StrategyUpdated(oldStrategy, newStrategy);
     }
 
