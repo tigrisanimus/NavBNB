@@ -290,12 +290,17 @@ contract NavBNBHandlerTest is NoLogBound {
         address user = users[userSeed % users.length];
         uint256 amount = bound(amountSeed, 1e12, 50 ether);
         vm.deal(user, user.balance + amount);
+        uint256 beforeSupply = nav.totalSupply();
+        uint256 beforeQueued = nav.queuedTotalOwedBNB();
         uint256 beforeBalance = address(nav).balance;
         vm.prank(user);
         nav.deposit{value: amount}();
         uint256 afterBalance = address(nav).balance;
         if (afterBalance < beforeBalance) {
-            unexpectedOutflow = true;
+            bool sweepExpected = beforeSupply == 0 && beforeQueued == 0 && beforeBalance > 0;
+            if (!sweepExpected || afterBalance != amount) {
+                unexpectedOutflow = true;
+            }
         }
         _trackParticipant(user);
     }
