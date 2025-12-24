@@ -528,13 +528,14 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.deposit{value: 1 ether}(0);
 
-        vm.warp(block.timestamp + 1 days);
+        uint256 depositedAt = nav.lastDepositTime(alice);
+        vm.warp(depositedAt + 1 days);
         assertEq(nav.exitFeeBps(alice), 500);
 
-        vm.warp(block.timestamp + 2 days);
+        vm.warp(depositedAt + 3 days);
         assertApproxEqAbs(nav.exitFeeBps(alice), 250, 1);
 
-        vm.warp(block.timestamp + 2 days);
+        vm.warp(depositedAt + 5 days);
         assertEq(nav.exitFeeBps(alice), 0);
     }
 
