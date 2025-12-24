@@ -30,6 +30,10 @@ contract NavBNBv2 {
 
     IBNBYieldStrategy public strategy;
     uint256 public liquidityBufferBPS = 1_000;
+    uint256 public minExitSeconds;
+    uint256 public fullExitSeconds;
+    uint256 public maxExitFeeBps;
+    mapping(address => uint64) public lastDepositTime;
 
     address public immutable guardian;
     address public immutable recovery;
@@ -67,6 +71,8 @@ contract NavBNBv2 {
     event StrategyProposalCancelled();
     event StrategyTimelockUpdated(uint256 newSeconds);
     event LiquidityBufferUpdated(uint256 bps);
+    event ExitFeeConfigUpdated(uint256 minSeconds, uint256 fullSeconds, uint256 maxFeeBps);
+    event ExitFeeCharged(address indexed account, uint256 feeBps, uint256 feeAmount);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -94,6 +100,8 @@ contract NavBNBv2 {
     error StrategyTimelockNotExpired();
     error StrategyTimelockTooLong();
     error StrategyTimelockEnabled();
+    error TooEarlyForFreeExit();
+    error ExitFeeConfigInvalid();
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -225,6 +233,25 @@ contract NavBNBv2 {
         emit LiquidityBufferUpdated(newBps);
     }
 
+    function setExitFeeConfig(uint256 minSeconds, uint256 fullSeconds, uint256 maxFeeBps) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        if (fullSeconds < minSeconds) {
+            revert ExitFeeConfigInvalid();
+        }
+        if (maxFeeBps > BPS) {
+            revert ExitFeeConfigInvalid();
+        }
+        if (fullSeconds == minSeconds && maxFeeBps != 0) {
+            revert ExitFeeConfigInvalid();
+        }
+        minExitSeconds = minSeconds;
+        fullExitSeconds = fullSeconds;
+        maxExitFeeBps = maxFeeBps;
+        emit ExitFeeConfigUpdated(minSeconds, fullSeconds, maxFeeBps);
+    }
+
     function deposit(uint256 minSharesOut) external payable nonReentrant whenNotPaused {
         if (msg.value == 0) {
             revert ZeroDeposit();
@@ -250,6 +277,7 @@ contract NavBNBv2 {
             revert Slippage();
         }
         _mint(msg.sender, minted);
+        lastDepositTime[msg.sender] = uint64(block.timestamp);
         trackedAssetsBNB = totalAssets();
         _investExcess();
         emit Deposit(msg.sender, msg.value, minted);
@@ -258,6 +286,10 @@ contract NavBNBv2 {
     function redeem(uint256 tokenAmount, uint256 minBnbOut) external nonReentrant whenNotPaused {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
+        }
+        uint64 lastDeposit = lastDepositTime[msg.sender];
+        if (lastDeposit != 0 && minExitSeconds != 0 && block.timestamp < uint256(lastDeposit) + minExitSeconds) {
+            revert TooEarlyForFreeExit();
         }
         uint256 obligations = _totalObligations();
         if (totalAssets() <= obligations) {
@@ -269,9 +301,11 @@ contract NavBNBv2 {
         }
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
         uint256 fee = (bnbOwed * REDEEM_FEE_BPS) / BPS;
-        uint256 bnbAfterFee = bnbOwed - fee;
+        uint256 timeFeeBps = exitFeeBps(msg.sender);
+        uint256 timeFee = ((bnbOwed - fee) * timeFeeBps) / BPS;
+        uint256 bnbAfterFee = bnbOwed - fee - timeFee;
         if (bnbAfterFee == 0) {
-            revert Slippage();
+            revert NoProgress();
         }
         if (bnbAfterFee < minBnbOut) {
             revert Slippage();
@@ -279,29 +313,19 @@ contract NavBNBv2 {
 
         uint256 bnbPaid;
         uint256 bnbQueued;
-        uint256 day = _currentDay();
-        _initCapBase(day);
-        uint256 capRemaining = _capRemaining(day);
-
         if (totalLiabilitiesBNB > 0) {
-            uint256 paidFromQueue = _payQueueHead(day, capRemaining, DEFAULT_MAX_STEPS);
-            capRemaining -= paidFromQueue;
-            if (totalLiabilitiesBNB == 0 && capRemaining > 0) {
-                if (capRemaining >= bnbAfterFee) {
-                    bnbPaid = bnbAfterFee;
-                } else {
-                    bnbPaid = capRemaining;
-                    bnbQueued = bnbAfterFee - capRemaining;
-                }
-            } else {
-                bnbQueued = bnbAfterFee;
-            }
+            _payQueueHead(totalLiabilitiesBNB, DEFAULT_MAX_STEPS);
+        }
+        if (totalLiabilitiesBNB > 0) {
+            bnbQueued = bnbAfterFee;
         } else {
-            if (capRemaining >= bnbAfterFee) {
+            _ensureLiquidity(bnbAfterFee);
+            uint256 liquidAvailable = _redeemableBalance();
+            if (liquidAvailable >= bnbAfterFee) {
                 bnbPaid = bnbAfterFee;
             } else {
-                bnbPaid = capRemaining;
-                bnbQueued = bnbAfterFee - capRemaining;
+                bnbPaid = liquidAvailable;
+                bnbQueued = bnbAfterFee - liquidAvailable;
             }
         }
 
@@ -310,7 +334,6 @@ contract NavBNBv2 {
         }
 
         if (bnbPaid > 0) {
-            spentToday[day] += bnbPaid;
             _ensureLiquidity(bnbPaid);
             (bool success,) = msg.sender.call{value: bnbPaid}("");
             if (!success) {
@@ -320,6 +343,9 @@ contract NavBNBv2 {
         }
 
         _burn(msg.sender, tokenAmount);
+        if (timeFee > 0) {
+            emit ExitFeeCharged(msg.sender, timeFeeBps, timeFee);
+        }
         emit Redeem(msg.sender, tokenAmount, bnbPaid, bnbQueued);
     }
 
@@ -338,13 +364,7 @@ contract NavBNBv2 {
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
-        uint256 day = _currentDay();
-        _initCapBase(day);
-        uint256 capRemaining = _capRemaining(day);
-        if (capRemaining == 0) {
-            return;
-        }
-        uint256 totalPaid = _payQueueHead(day, capRemaining, maxSteps);
+        uint256 totalPaid = _payQueueHead(totalLiabilitiesBNB, maxSteps);
         if (totalPaid > 0) {
             emit Claim(msg.sender, totalPaid);
         }
@@ -357,7 +377,6 @@ contract NavBNBv2 {
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
-        _initCapBase(_currentDay());
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
         uint256 fee = (bnbOwed * EMERGENCY_FEE_BPS + (BPS - 1)) / BPS;
@@ -425,6 +444,32 @@ contract NavBNBv2 {
         return address(this).balance + strategyAssets;
     }
 
+    function exitFeeBps(address user) public view returns (uint256) {
+        if (maxExitFeeBps == 0) {
+            return 0;
+        }
+        uint64 lastDeposit = lastDepositTime[user];
+        if (lastDeposit == 0) {
+            return 0;
+        }
+        uint256 minSeconds = minExitSeconds;
+        uint256 fullSeconds = fullExitSeconds;
+        if (fullSeconds <= minSeconds) {
+            return 0;
+        }
+        uint256 start = uint256(lastDeposit) + minSeconds;
+        if (block.timestamp < start) {
+            return maxExitFeeBps;
+        }
+        uint256 end = uint256(lastDeposit) + fullSeconds;
+        if (block.timestamp >= end) {
+            return 0;
+        }
+        uint256 remaining = end - block.timestamp;
+        uint256 duration = fullSeconds - minSeconds;
+        return (maxExitFeeBps * remaining) / duration;
+    }
+
     function untrackedSurplusBNB() public view returns (uint256) {
         uint256 balance = address(this).balance;
         uint256 reserved = trackedAssetsBNB + totalClaimableBNB;
@@ -471,6 +516,14 @@ contract NavBNBv2 {
         return available < assets ? available : assets;
     }
 
+    function _redeemableBalance() internal view returns (uint256) {
+        uint256 balance = address(this).balance;
+        if (balance <= totalClaimableBNB) {
+            return 0;
+        }
+        return balance - totalClaimableBNB;
+    }
+
     function _currentDay() internal view returns (uint256) {
         return block.timestamp / 1 days;
     }
@@ -492,7 +545,7 @@ contract NavBNBv2 {
         totalLiabilitiesBNB += amount;
     }
 
-    function _payQueueHead(uint256 day, uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid) {
+    function _payQueueHead(uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid) {
         if (maxAmount == 0 || totalLiabilitiesBNB == 0) {
             return 0;
         }
@@ -544,7 +597,6 @@ contract NavBNBv2 {
                 steps++;
                 continue;
             } else {
-                spentToday[day] += pay;
                 paid += pay;
                 remainingCap -= pay;
                 remainingLiquid -= pay;
@@ -600,23 +652,24 @@ contract NavBNBv2 {
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
-        uint256 day = _currentDay();
-        _initCapBase(day);
-        uint256 capRemaining = _capRemaining(day);
-        uint256 payout = claimable <= capRemaining ? claimable : capRemaining;
         uint256 assets = totalAssets();
-        if (payout > assets) {
-            payout = assets;
+        uint256 payout = claimable > assets ? assets : claimable;
+        if (payout == 0) {
+            revert NoProgress();
+        }
+        _ensureLiquidity(payout);
+        uint256 liquidAvailable = address(this).balance;
+        if (payout > liquidAvailable) {
+            payout = liquidAvailable;
         }
         if (payout < minOut) {
             revert Slippage();
         }
         if (payout == 0) {
-            return;
+            revert NoProgress();
         }
         claimableBNB[msg.sender] = claimable - payout;
         totalClaimableBNB -= payout;
-        spentToday[day] += payout;
         _ensureLiquidity(payout);
         (bool success,) = msg.sender.call{value: payout}("");
         if (!success) {

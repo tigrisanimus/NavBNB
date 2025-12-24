@@ -6,6 +6,7 @@ import {IBNBYieldStrategy} from "src/IBNBYieldStrategy.sol";
 contract MockBNBYieldStrategy is IBNBYieldStrategy {
     uint256 internal stored;
     bool internal forceZeroWithdraw;
+    uint256 internal maxWithdraw;
 
     function deposit() external payable {
         stored += msg.value;
@@ -16,6 +17,9 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
             return 0;
         }
         uint256 amount = bnbAmount > stored ? stored : bnbAmount;
+        if (maxWithdraw != 0 && amount > maxWithdraw) {
+            amount = maxWithdraw;
+        }
         stored -= amount;
         (bool success,) = msg.sender.call{value: amount}("");
         require(success, "SEND_FAIL");
@@ -43,5 +47,9 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
 
     function setForceZeroWithdraw(bool value) external {
         forceZeroWithdraw = value;
+    }
+
+    function setMaxWithdraw(uint256 amount) external {
+        maxWithdraw = amount;
     }
 }
