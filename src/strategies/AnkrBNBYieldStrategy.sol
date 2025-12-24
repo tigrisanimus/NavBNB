@@ -45,6 +45,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
 
     uint16 public maxSlippageBps;
     uint16 public valuationHaircutBps;
+    uint32 public deadlineSeconds;
+    uint256 public maxChunkAnkr;
     bool public paused;
     address public recoveryAddress;
 
@@ -69,6 +71,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     error ZeroAddress();
     error InvalidRecoveryToken();
     error InvalidRecipient();
+    error InputNotConsumed();
 
     modifier onlyVault() {
         if (msg.sender != vault) {
@@ -111,6 +114,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         vault = vault_;
         maxSlippageBps = 100;
         valuationHaircutBps = 100;
+        deadlineSeconds = 300;
+        maxChunkAnkr = 500 ether;
         recoveryAddress = recovery_;
     }
 
@@ -142,6 +147,14 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         uint256 oldBps = valuationHaircutBps;
         valuationHaircutBps = newBps;
         emit ValuationHaircutBpsSet(oldBps, newBps);
+    }
+
+    function setDeadlineSeconds(uint32 newSeconds) external onlyGuardian {
+        deadlineSeconds = newSeconds;
+    }
+
+    function setMaxChunkAnkr(uint256 newMaxChunk) external onlyGuardian {
+        maxChunkAnkr = newMaxChunk;
     }
 
     function setRecoveryAddress(address newRecovery) external onlyGuardian {
@@ -189,32 +202,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         uint256 ankrBalance = ankrBNB.balanceOf(address(this));
         uint256 ankrNeeded = _mulDivUp(bnbAmount, ONE, ratio);
         uint256 ankrToSwap = ankrNeeded > ankrBalance ? ankrBalance : ankrNeeded;
-        if (ankrToSwap == 0) {
-            return 0;
-        }
-
-        address[] memory path = new address[](2);
-        path[0] = address(ankrBNB);
-        path[1] = address(wbnb);
-
-        uint256 expectedBnb = (ankrToSwap * ratio) / ONE;
-        uint256 amountOutMin = _minOutFromExpected(expectedBnb);
-
-        _approve(ankrBNB, address(router), ankrToSwap);
-        uint256[] memory amounts =
-            router.swapExactTokensForTokens(ankrToSwap, amountOutMin, path, address(this), block.timestamp);
-        _approve(ankrBNB, address(router), 0);
-
-        uint256 wbnbOut = amounts[amounts.length - 1];
-        uint256 balanceBefore = address(this).balance;
-        wbnb.withdraw(wbnbOut);
-        uint256 bnbOut = address(this).balance - balanceBefore;
-        if (bnbOut > 0) {
-            (bool success,) = vault.call{value: bnbOut}("");
-            if (!success) {
-                revert BnbSendFail();
-            }
-        }
+        _swapAnkrForBnb(ankrToSwap, ratio);
+        uint256 bnbOut = _sendAllBnbToVault();
         return bnbOut;
     }
 
@@ -222,30 +211,11 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         uint256 ankrBalance = ankrBNB.balanceOf(address(this));
         uint256 ratio = _exchangeRatio();
         if (ankrBalance > 0) {
-            address[] memory path = new address[](2);
-            path[0] = address(ankrBNB);
-            path[1] = address(wbnb);
-
-            uint256 expectedBnb = (ankrBalance * ratio) / ONE;
-            uint256 amountOutMin = _minOutFromExpected(expectedBnb);
-            _approve(ankrBNB, address(router), ankrBalance);
-            uint256[] memory amounts =
-                router.swapExactTokensForTokens(ankrBalance, amountOutMin, path, address(this), block.timestamp);
-            _approve(ankrBNB, address(router), 0);
-
-            uint256 wbnbOut = amounts[amounts.length - 1];
-            uint256 balanceBefore = address(this).balance;
-            wbnb.withdraw(wbnbOut);
-            uint256 bnbOut = address(this).balance - balanceBefore;
-            emit WithdrawAllToVault(bnbOut, ankrBalance);
+            _swapAnkrForBnb(ankrBalance, ratio);
         }
-
-        uint256 totalBnb = address(this).balance;
-        if (totalBnb > 0) {
-            (bool success,) = vault.call{value: totalBnb}("");
-            if (!success) {
-                revert BnbSendFail();
-            }
+        uint256 totalBnb = _sendAllBnbToVault();
+        if (ankrBalance > 0) {
+            emit WithdrawAllToVault(totalBnb, ankrBalance);
         }
         return totalBnb;
     }
@@ -272,7 +242,55 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
 
     function _mulDivUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
         uint256 product = a * b;
-        return (product + denominator - 1) / denominator;
+        uint256 quotient = product / denominator;
+        uint256 remainder = product % denominator;
+        return remainder == 0 ? quotient : quotient + 1;
+    }
+
+    function _swapAnkrForBnb(uint256 ankrToSwap, uint256 ratio) internal {
+        if (ankrToSwap == 0 || ratio == 0) {
+            return;
+        }
+        address[] memory path = new address[](2);
+        path[0] = address(ankrBNB);
+        path[1] = address(wbnb);
+
+        uint256 remaining = ankrToSwap;
+        uint256 chunkSize = maxChunkAnkr == 0 ? remaining : maxChunkAnkr;
+        while (remaining > 0) {
+            uint256 chunk = remaining > chunkSize ? chunkSize : remaining;
+            uint256 expectedBnb = (chunk * ratio) / ONE;
+            uint256 amountOutMin = _minOutFromExpected(expectedBnb);
+            uint256 ankrBefore = ankrBNB.balanceOf(address(this));
+
+            _approve(ankrBNB, address(router), chunk);
+            router.swapExactTokensForTokens(chunk, amountOutMin, path, address(this), block.timestamp + deadlineSeconds);
+            _approve(ankrBNB, address(router), 0);
+
+            uint256 ankrAfter = ankrBNB.balanceOf(address(this));
+            if (ankrBefore - ankrAfter != chunk) {
+                revert InputNotConsumed();
+            }
+            uint256 wbnbBalance = wbnb.balanceOf(address(this));
+            if (wbnbBalance > 0) {
+                wbnb.withdraw(wbnbBalance);
+            }
+            remaining -= chunk;
+        }
+    }
+
+    function _sendAllBnbToVault() internal returns (uint256 bnbOut) {
+        uint256 wbnbBalance = wbnb.balanceOf(address(this));
+        if (wbnbBalance > 0) {
+            wbnb.withdraw(wbnbBalance);
+        }
+        bnbOut = address(this).balance;
+        if (bnbOut > 0) {
+            (bool success,) = vault.call{value: bnbOut}("");
+            if (!success) {
+                revert BnbSendFail();
+            }
+        }
     }
 
     function _approve(IERC20 token, address spender, uint256 amount) internal {

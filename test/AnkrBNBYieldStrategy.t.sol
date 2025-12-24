@@ -229,6 +229,65 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertEq(received, balanceAfter - balanceBefore);
         assertGt(received, 0);
     }
+
+    function testSwapDeadlineUsesBuffer() public {
+        strategy.deposit{value: 1 ether}();
+        vm.prank(guardian);
+        strategy.setDeadlineSeconds(600);
+
+        uint256 expectedDeadline = block.timestamp + 600;
+        strategy.withdraw(1 ether);
+        assertEq(router.lastDeadline(), expectedDeadline);
+    }
+
+    function testSwapChunkingSplitsLargeSwap() public {
+        strategy.deposit{value: 10 ether}();
+        vm.prank(guardian);
+        strategy.setMaxChunkAnkr(2 ether);
+
+        strategy.withdraw(9 ether);
+
+        assertGt(router.swapCallCount(), 1);
+    }
+
+    function testMulDivUpHandlesLargeValues() public {
+        AnkrBNBYieldStrategyHarness harness = new AnkrBNBYieldStrategyHarness(
+            address(this), guardian, address(pool), address(ankrBNB), address(router), address(wbnb), recovery
+        );
+        uint256 a = type(uint128).max;
+        uint256 b = 1e18;
+        uint256 denominator = 1e18 - 1;
+        uint256 product = a * b;
+        uint256 expected = product / denominator + (product % denominator == 0 ? 0 : 1);
+        uint256 value = harness.exposedMulDivUp(a, b, denominator);
+        assertEq(value, expected);
+    }
+
+    function testWbnbDustDoesNotBlockWithdrawAll() public {
+        wbnb.mint(address(strategy), 1 ether);
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdrawAllToVault();
+        uint256 balanceAfter = address(this).balance;
+
+        assertEq(received, balanceAfter - balanceBefore);
+        assertEq(received, 1 ether);
+    }
+}
+
+contract AnkrBNBYieldStrategyHarness is AnkrBNBYieldStrategy {
+    constructor(
+        address vault_,
+        address guardian_,
+        address bnbStakingPool_,
+        address ankrBNB_,
+        address router_,
+        address wbnb_,
+        address recovery_
+    ) AnkrBNBYieldStrategy(vault_, guardian_, bnbStakingPool_, ankrBNB_, router_, wbnb_, recovery_) {}
+
+    function exposedMulDivUp(uint256 a, uint256 b, uint256 denominator) external pure returns (uint256) {
+        return _mulDivUp(a, b, denominator);
+    }
 }
 
 contract NavBNBv2StrategyWiringTest is Test {

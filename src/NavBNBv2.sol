@@ -3,6 +3,19 @@ pragma solidity ^0.8.30;
 
 import {IBNBYieldStrategy} from "./IBNBYieldStrategy.sol";
 
+interface IBNBYieldStrategyWithAll is IBNBYieldStrategy {
+    function withdrawAllToVault() external returns (uint256);
+}
+
+interface IERC20 {
+    function balanceOf(address account) external view returns (uint256);
+}
+
+interface IAnkrStrategyTokens {
+    function ankrBNB() external view returns (address);
+    function wbnb() external view returns (address);
+}
+
 contract NavBNBv2 {
     string public constant name = "NavBNBv2";
     string public constant symbol = "nBNBv2";
@@ -11,7 +24,6 @@ contract NavBNBv2 {
     uint256 public constant BPS = 10_000;
     uint256 public constant MINT_FEE_BPS = 25;
     uint256 public constant REDEEM_FEE_BPS = 25;
-    uint256 public constant CAP_BPS = 1_000;
     uint256 public constant EMERGENCY_FEE_BPS = 1_000;
     uint256 public constant DEFAULT_MAX_STEPS = 32;
 
@@ -21,10 +33,6 @@ contract NavBNBv2 {
 
     uint256 public totalLiabilitiesBNB;
     uint256 public totalClaimableBNB;
-    mapping(uint256 => uint256) public spentToday;
-    mapping(uint256 => uint256) internal capBaseBNB;
-    mapping(uint256 => bool) internal capBaseSet;
-
     uint256 public trackedAssetsBNB;
     mapping(address => uint256) public claimableBNB;
 
@@ -53,6 +61,10 @@ contract NavBNBv2 {
 
     QueueEntry[] internal queue;
     uint256 public queueHead;
+    uint256 internal queueCompactionIndex;
+    uint256 internal queueCompactionPopped;
+    uint256 internal queueCompactionHead;
+    uint256 internal queueCompactionLength;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -63,7 +75,6 @@ contract NavBNBv2 {
     event Paused(address indexed account);
     event Unpaused(address indexed account);
     event RecoverSurplus(address indexed to, uint256 amount);
-    event CapExhausted(uint256 indexed day, uint256 spent, uint256 cap);
     event ClaimableCredited(address indexed user, uint256 amount);
     event StrategyUpdated(address indexed oldStrategy, address indexed newStrategy);
     event StrategyProposed(address indexed newStrategy, uint256 activationTime);
@@ -78,7 +89,6 @@ contract NavBNBv2 {
     error ZeroRedeem();
     error Slippage();
     error PausedError();
-    error CapReached();
     error Insolvent();
     error NotGuardian();
     error NotRecovery();
@@ -125,6 +135,8 @@ contract NavBNBv2 {
         guardian = guardian_;
         recovery = recovery_;
         strategyTimelockSeconds = 1 days;
+        fullExitSeconds = 30 days;
+        maxExitFeeBps = 500;
     }
 
     receive() external payable {}
@@ -489,53 +501,10 @@ contract NavBNBv2 {
         return balance - reserved;
     }
 
-    function capForDay(uint256 day) external view returns (uint256) {
-        return _dayCap(day);
-    }
-
-    function _dayCap(uint256 day) internal view returns (uint256) {
-        uint256 base = capBaseSet[day] ? capBaseBNB[day] : totalAssets();
-        return (base * CAP_BPS) / BPS;
-    }
-
-    function _initCapBase(uint256 day) internal {
-        if (!capBaseSet[day]) {
-            capBaseSet[day] = true;
-            capBaseBNB[day] = totalAssets();
-        }
-    }
-
-    function _capRemaining(uint256 day) internal view returns (uint256) {
-        uint256 cap = _dayCap(day);
-        uint256 spent = spentToday[day];
-        return cap > spent ? cap - spent : 0;
-    }
-
-    function capRemainingForDay(uint256 day) external view returns (uint256) {
-        return _capRemaining(day);
-    }
-
-    function capRemainingToday() external view returns (uint256) {
-        return _capRemaining(_currentDay());
-    }
-
-    function _availableForDay(uint256 day) internal view returns (uint256) {
-        uint256 capRemaining = _capRemaining(day);
-        uint256 available = capRemaining < totalLiabilitiesBNB ? capRemaining : totalLiabilitiesBNB;
-        uint256 assets = totalAssets();
-        return available < assets ? available : assets;
-    }
-
     function _redeemableBalance() internal view returns (uint256) {
         uint256 balance = address(this).balance;
-        if (balance <= totalClaimableBNB) {
-            return 0;
-        }
-        return balance - totalClaimableBNB;
-    }
-
-    function _currentDay() internal view returns (uint256) {
-        return block.timestamp / 1 days;
+        uint256 reserved = totalClaimableBNB;
+        return balance > reserved ? balance - reserved : 0;
     }
 
     function _totalObligations() internal view returns (uint256) {
@@ -551,23 +520,15 @@ contract NavBNBv2 {
         if (maxAmount == 0 || totalLiabilitiesBNB == 0) {
             return 0;
         }
-        uint256 liquid = totalAssets() > totalClaimableBNB ? totalAssets() - totalClaimableBNB : 0;
         uint256 remainingCap = maxAmount;
         if (remainingCap > totalLiabilitiesBNB) {
             remainingCap = totalLiabilitiesBNB;
         }
-        uint256 remainingLiquid = liquid;
-        if (remainingLiquid > totalLiabilitiesBNB) {
-            remainingLiquid = totalLiabilitiesBNB;
-        }
         uint256 payBudget = remainingCap;
-        if (payBudget > remainingLiquid) {
-            payBudget = remainingLiquid;
-        }
         _ensureLiquidity(payBudget);
-        remainingLiquid = address(this).balance;
-        if (remainingLiquid > payBudget) {
-            remainingLiquid = payBudget;
+        uint256 remainingLiquid = _redeemableBalance();
+        if (remainingLiquid > remainingCap) {
+            remainingLiquid = remainingCap;
         }
         uint256 head = queueHead;
         uint256 steps;
@@ -632,18 +593,42 @@ contract NavBNBv2 {
         }
         uint256 len = queue.length;
         uint256 remaining = len - head;
-        if (maxMoves < remaining) {
+        if (queueCompactionHead != head || queueCompactionLength != len) {
+            queueCompactionHead = head;
+            queueCompactionLength = len;
+            queueCompactionIndex = 0;
+            queueCompactionPopped = 0;
+        }
+        uint256 movesLeft = maxMoves;
+        if (queueCompactionIndex < remaining) {
+            uint256 shiftRemaining = remaining - queueCompactionIndex;
+            uint256 shiftMoves = shiftRemaining > movesLeft ? movesLeft : shiftRemaining;
+            for (uint256 i = 0; i < shiftMoves; i++) {
+                queue[queueCompactionIndex + i] = queue[head + queueCompactionIndex + i];
+            }
+            queueCompactionIndex += shiftMoves;
+            movesLeft -= shiftMoves;
+        }
+        if (queueCompactionIndex < remaining || movesLeft == 0) {
             return;
         }
-        QueueEntry[] memory entries = new QueueEntry[](remaining);
-        for (uint256 i = 0; i < remaining; i++) {
-            entries[i] = queue[head + i];
+        uint256 popRemaining = head - queueCompactionPopped;
+        uint256 popMoves = popRemaining > movesLeft ? movesLeft : popRemaining;
+        for (uint256 i = 0; i < popMoves; i++) {
+            queue.pop();
         }
-        delete queue;
-        for (uint256 i = 0; i < remaining; i++) {
-            queue.push(entries[i]);
+        queueCompactionPopped += popMoves;
+        if (popMoves > 0) {
+            queueCompactionLength = len - popMoves;
+        }
+        if (queueCompactionPopped < head) {
+            return;
         }
         queueHead = 0;
+        queueCompactionIndex = 0;
+        queueCompactionPopped = 0;
+        queueCompactionHead = 0;
+        queueCompactionLength = 0;
     }
 
     function withdrawClaimable(uint256 minOut) external nonReentrant whenNotPaused {
@@ -714,10 +699,11 @@ contract NavBNBv2 {
         }
         uint256 shortfall = needed - balance;
         uint256 available = strategy.totalAssets();
-        if (available < shortfall) {
-            shortfall = available;
+        uint256 withdrawAmount = shortfall > available ? available : shortfall;
+        if (withdrawAmount == 0) {
+            revert InsufficientLiquidityAfterWithdraw();
         }
-        uint256 received = strategy.withdraw(shortfall);
+        uint256 received = strategy.withdraw(withdrawAmount);
         if (available > 0 && received == 0) {
             revert StrategyWithdrawFailed();
         }
@@ -742,20 +728,42 @@ contract NavBNBv2 {
     function _setStrategy(address newStrategy) internal {
         address oldStrategy = address(strategy);
         if (oldStrategy != address(0)) {
-            if (strategy.totalAssets() != 0) {
-                revert StrategyNotEmpty();
-            }
+            IBNBYieldStrategyWithAll(oldStrategy).withdrawAllToVault();
+            _requireStrategyEmpty(oldStrategy);
         }
         if (newStrategy != address(0)) {
             if (newStrategy.code.length == 0) {
                 revert StrategyNotContract();
             }
-            if (IBNBYieldStrategy(newStrategy).totalAssets() != 0) {
-                revert StrategyNotEmpty();
-            }
+            _requireStrategyEmpty(newStrategy);
         }
         strategy = IBNBYieldStrategy(newStrategy);
         emit StrategyUpdated(oldStrategy, newStrategy);
+    }
+
+    function _requireStrategyEmpty(address strategyAddress) internal view {
+        if (IBNBYieldStrategy(strategyAddress).totalAssets() != 0) {
+            revert StrategyNotEmpty();
+        }
+        if (strategyAddress.balance != 0) {
+            revert StrategyNotEmpty();
+        }
+        _requireTokenBalanceEmpty(strategyAddress, IAnkrStrategyTokens.ankrBNB.selector);
+        _requireTokenBalanceEmpty(strategyAddress, IAnkrStrategyTokens.wbnb.selector);
+    }
+
+    function _requireTokenBalanceEmpty(address strategyAddress, bytes4 selector) internal view {
+        (bool success, bytes memory data) = strategyAddress.staticcall(abi.encodeWithSelector(selector));
+        if (!success || data.length != 32) {
+            return;
+        }
+        address token = abi.decode(data, (address));
+        if (token == address(0)) {
+            return;
+        }
+        if (IERC20(token).balanceOf(strategyAddress) != 0) {
+            revert StrategyNotEmpty();
+        }
     }
 
     function _clearPendingStrategy() internal {
