@@ -285,27 +285,42 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertEq(received, 1 ether);
     }
 
-    function testDepositRejectsRatioOutOfBounds() public {
-        pool.setExchangeRatio(0);
-
-        vm.expectRevert(AnkrBNBYieldStrategy.RatioOutOfBounds.selector);
+    function testWithdrawContinuesOnRatioJump() public {
         strategy.deposit{value: 1 ether}();
+        uint256 lastGood = strategy.lastRatio();
+        pool.setExchangeRatio((ONE * 120) / 100);
+
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(1 ether);
+        uint256 balanceAfter = address(this).balance;
+
+        assertEq(received, balanceAfter - balanceBefore);
+        assertGt(received, 0);
+        assertEq(strategy.lastRatio(), lastGood);
     }
 
-    function testWithdrawRejectsRatioOutOfBounds() public {
+    function testWithdrawClampsLowRatioOutOfBounds() public {
+        strategy.deposit{value: 1 ether}();
+        pool.setExchangeRatio(5e17);
+
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(1 ether);
+        uint256 balanceAfter = address(this).balance;
+
+        assertEq(received, balanceAfter - balanceBefore);
+        assertGt(received, 0);
+    }
+
+    function testWithdrawClampsHighRatioOutOfBounds() public {
         strategy.deposit{value: 1 ether}();
         pool.setExchangeRatio(3e18);
 
-        vm.expectRevert(AnkrBNBYieldStrategy.RatioOutOfBounds.selector);
-        strategy.withdraw(1 ether);
-    }
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(1 ether);
+        uint256 balanceAfter = address(this).balance;
 
-    function testWithdrawRejectsRatioJump() public {
-        strategy.deposit{value: 1 ether}();
-        pool.setExchangeRatio((ONE * 102) / 100);
-
-        vm.expectRevert(AnkrBNBYieldStrategy.RatioChangeTooLarge.selector);
-        strategy.withdraw(1 ether);
+        assertEq(received, balanceAfter - balanceBefore);
+        assertGt(received, 0);
     }
 
     function testWbnbDustIsUnwrappedOnWithdraw() public {

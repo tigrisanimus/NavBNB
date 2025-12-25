@@ -48,6 +48,14 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
         return stored;
     }
 
+    function ankrBNB() external pure returns (address) {
+        return address(0);
+    }
+
+    function wbnb() external pure returns (address) {
+        return address(0);
+    }
+
     function withdrawCallCount() external view returns (uint256) {
         return withdrawCalls;
     }
