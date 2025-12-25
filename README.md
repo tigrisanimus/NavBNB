@@ -31,8 +31,10 @@ NavBNB v2 is a BNB-denominated NAV token on BSC. The vault tracks net assets (to
 - **Redemption flow**: `redeem(tokenAmount, minBnbOut)` burns shares and attempts to pay BNB immediately.
 - **FIFO queue**: if immediate liquidity is insufficient, the unpaid amount is queued in FIFO order.
 - **Bounded processing**: queue processing uses `DEFAULT_MAX_STEPS = 32` to limit per-call work.
-- **Claimable credit**: if a queue payout transfer fails, the unpaid amount becomes `claimableBNB` for that user and is counted in obligations (`totalClaimableBNB`). Users can withdraw it via `withdrawClaimable(minOut)`.
+- **Minimum queue entry**: queued amounts must meet `minQueueEntryWei` (guardian-configurable) to prevent dust queue spam.
+- **Claimable fallback**: if a queue payout transfer fails, the unpaid amount becomes `claimableBNB` for that user and is counted in obligations (`totalClaimableBNB`). Users can withdraw it via `withdrawClaimable(minOut)`.
 - **Claiming**: `claim()` / `claim(maxSteps)` advances the queue and pays out as much as possible, bounded by `maxSteps`.
+- **No hard daily cap**: cap helpers exist, but claims/redemptions do not enforce a daily limit.
 
 ## Liquidity Buffer and Strategy Behavior
 
@@ -95,6 +97,7 @@ This strategy is included for integration/testing and should be treated as an ex
 - **FIFO queue accounting**: queued amounts are tracked in `totalLiabilitiesBNB`; failed sends are moved to `claimableBNB` and tracked in `totalClaimableBNB`.
 - **Strategy switching**: cannot switch strategies if either the current or new strategy holds assets.
 - **Liquidity buffer**: investments only occur when vault balance exceeds the buffer target.
+- **Direct BNB sends revert**: the vault only accepts BNB from the strategy or WBNB unwraps; forced sends become untracked surplus.
 
 ## Threat Model / Known Limitations
 
@@ -102,6 +105,7 @@ This strategy is included for integration/testing and should be treated as an ex
 - **No guaranteed yield**: returns depend entirely on external strategy performance; losses reduce NAV.
 - **Queue delays**: redemptions can be queued when liquidity is insufficient; claims are processed in bounded steps.
 - **Daily throttling not enforced**: cap helpers are present but not wired into redemptions/claims.
+- **Forced BNB transfers**: selfdestruct/forced transfers increase `untrackedSurplusBNB` and can only be recovered by `recovery` via `recoverSurplus`.
 - **No on-chain governance/timelock beyond strategy changes**: only the guardian can configure key parameters.
 
 ## Local Development

@@ -462,6 +462,24 @@ contract NavBNBv2 {
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
+        if (!acceptDust) {
+            if (queueHead >= queue.length) {
+                revert QueueEmpty();
+            }
+            QueueEntry storage entry = queue[queueHead];
+            uint256 redeemable = _queueRedeemableBalance();
+            address strategyAddress = address(strategy);
+            if (strategyAddress != address(0)) {
+                redeemable += strategy.totalAssets();
+            }
+            uint256 expectedPaid = entry.amount > redeemable ? redeemable : entry.amount;
+            if (expectedPaid == 0) {
+                revert NoLiquidity();
+            }
+            if (expectedPaid < minPayoutWei) {
+                revert PayoutTooSmall(expectedPaid, minPayoutWei);
+            }
+        }
         (uint256 totalPaid, uint256 totalCredited) = _payQueueHead(totalLiabilitiesBNB, maxSteps);
         uint256 totalProgress = totalPaid + totalCredited;
         if (totalProgress == 0) {
@@ -1062,10 +1080,10 @@ contract NavBNBv2 {
     }
 
     function _validatePayout(uint256 payout, bool acceptDust) internal view {
+        if (payout == 0) {
+            revert NoLiquidity();
+        }
         if (acceptDust) {
-            if (payout == 0) {
-                revert NoLiquidity();
-            }
             return;
         }
         if (payout < minPayoutWei) {

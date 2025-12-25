@@ -70,6 +70,17 @@ contract ForceSend {
     }
 }
 
+contract DirectSender {
+    function send(address payable target) external payable {
+        (bool success, bytes memory data) = target.call{value: msg.value}("");
+        if (!success) {
+            assembly {
+                revert(add(data, 32), mload(data))
+            }
+        }
+    }
+}
+
 abstract contract NoLogBound is Test {
     function bound(uint256 x, uint256 min, uint256 max) internal pure override returns (uint256 result) {
         return _bound(x, min, max);
@@ -286,6 +297,13 @@ contract NavBNBv2Test is NoLogBound {
         data = data;
     }
 
+    function testDirectBnbTransferRevertsFromContract() public {
+        DirectSender sender = new DirectSender();
+        vm.deal(address(sender), 1 ether);
+        vm.expectRevert(NavBNBv2.DirectBnbNotAccepted.selector);
+        sender.send{value: 1 ether}(payable(address(nav)));
+    }
+
     function testForcedBnbSendDoesNotMint() public {
         vm.prank(alice);
         nav.deposit{value: 2 ether}(0);
@@ -293,6 +311,7 @@ contract NavBNBv2Test is NoLogBound {
         uint256 totalSupplyBefore = nav.totalSupply();
         uint256 trackedBefore = nav.trackedAssetsBNB();
         uint256 balanceBefore = address(nav).balance;
+        uint256 surplusBefore = nav.untrackedSurplusBNB();
 
         ForceSend force = new ForceSend{value: 1 ether}();
         force.boom(payable(address(nav)));
@@ -300,6 +319,7 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(nav.totalSupply(), totalSupplyBefore);
         assertEq(nav.trackedAssetsBNB(), trackedBefore);
         assertEq(address(nav).balance, balanceBefore + 1 ether);
+        assertEq(nav.untrackedSurplusBNB(), surplusBefore + 1 ether);
     }
 
     function testReceiveAcceptsWbnbUnwrap() public {
@@ -1612,10 +1632,15 @@ contract NavBNBv2Test is NoLogBound {
         _seedQueue(alice, 1, 0.5 ether);
 
         uint256 headBefore = nav.queueHead();
+        uint256 liabilitiesBefore = nav.totalLiabilitiesBNB();
+        (, uint256 amountBefore) = nav.getQueueEntry(0);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(NavBNBv2.PayoutTooSmall.selector, 0.5 ether, 1 ether));
         nav.claim(1, false);
         assertEq(nav.queueHead(), headBefore);
+        assertEq(nav.totalLiabilitiesBNB(), liabilitiesBefore);
+        (, uint256 amountAfter) = nav.getQueueEntry(0);
+        assertEq(amountAfter, amountBefore);
     }
 
     function testClaimAcceptsDustWithOverride() public {
@@ -1662,10 +1687,28 @@ contract NavBNBv2Test is NoLogBound {
         nav.deposit{value: 1 ether}(0);
 
         uint256 shares = nav.balanceOf(alice) / 2;
+        uint256 supplyBefore = nav.totalSupply();
+        uint256 balanceBefore = alice.balance;
         vm.prank(alice);
         (uint256 bnbOut,) = nav.previewEmergencyRedeem(shares);
         vm.expectRevert(abi.encodeWithSelector(NavBNBv2.PayoutTooSmall.selector, bnbOut, 1 ether));
         nav.emergencyRedeem(shares, 0);
+        assertEq(nav.totalSupply(), supplyBefore);
+        assertEq(alice.balance, balanceBefore);
+    }
+
+    function testWithdrawClaimableRejectsPayoutBelowMinimum() public {
+        _setMinPayout(1 ether);
+        stdstore.target(address(nav)).sig("claimableBNB(address)").with_key(alice).checked_write(0.5 ether);
+        stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(0.5 ether);
+        vm.deal(address(nav), 0.5 ether);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(NavBNBv2.PayoutTooSmall.selector, 0.5 ether, 1 ether));
+        nav.withdrawClaimable(0);
+
+        assertEq(nav.claimableBNB(alice), 0.5 ether);
+        assertEq(nav.totalClaimableBNB(), 0.5 ether);
     }
 
     function testEmergencyRedeemRoundsUpFee() public {
