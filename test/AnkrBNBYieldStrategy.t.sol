@@ -57,24 +57,22 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertGt(strategy.totalAssets(), 10 ether);
     }
 
-    function testWithdrawUsesConservativeMinOutNotRouterQuote() public {
+    function testWithdrawUsesRouterQuoteForMinOut() public {
         strategy.deposit{value: 10 ether}();
 
         vm.prank(guardian);
         strategy.setMaxSlippageBps(100);
 
+        pool.setExchangeRatio(2e18);
         router.setRate((1e18 * 2) / 10);
         router.setLiquidityOut((1 ether * 2) / 10);
 
-        address[] memory path = new address[](2);
-        path[0] = address(ankrBNB);
-        path[1] = address(wbnb);
-        uint256[] memory quote = router.getAmountsOut(1 ether, path);
-        uint256 amountOutMinLegacy = (quote[1] * (strategy.BPS() - strategy.maxSlippageBps())) / strategy.BPS();
-        assertLt(amountOutMinLegacy, 1 ether);
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(1 ether);
+        uint256 balanceAfter = address(this).balance;
 
-        vm.expectRevert(bytes("SLIPPAGE"));
-        strategy.withdraw(1 ether);
+        assertEq(received, balanceAfter - balanceBefore);
+        assertGt(received, 0);
     }
 
     function testWithdrawCanReturnPartialWhenLiquidityLimited() public {
@@ -246,6 +244,17 @@ contract AnkrBNBYieldStrategyTest is Test {
         uint256 expectedDeadline = block.timestamp + 300;
         strategy.withdraw(1 ether);
         assertEq(router.lastDeadline(), expectedDeadline);
+    }
+
+    function testDeadlineSecondsBounds() public {
+        vm.prank(guardian);
+        vm.expectRevert(AnkrBNBYieldStrategy.InvalidDeadline.selector);
+        strategy.setDeadlineSeconds(0);
+
+        uint32 maxDeadline = uint32(strategy.MAX_DEADLINE_SECONDS());
+        vm.prank(guardian);
+        vm.expectRevert(AnkrBNBYieldStrategy.InvalidDeadline.selector);
+        strategy.setDeadlineSeconds(maxDeadline + 1);
     }
 
     function testSwapChunkingSplitsLargeSwap() public {

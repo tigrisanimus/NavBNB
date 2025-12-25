@@ -35,6 +35,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     uint256 public constant BPS = 10_000;
     uint16 public constant MAX_SLIPPAGE_BPS = 500;
     uint16 public constant MAX_VALUATION_HAIRCUT_BPS = 500;
+    uint32 public constant MAX_DEADLINE_SECONDS = 1 days;
     uint256 private constant ONE = 1e18;
 
     address public immutable vault;
@@ -62,6 +63,9 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     event Recovered(address indexed token, uint256 amount, address indexed to);
     event RecoveryAddressUpdated(address indexed oldAddress, address indexed newAddress);
     event WithdrawAllToVault(uint256 withdrawnBNB, uint256 lstSold);
+    event RatioFallback(
+        uint256 observedRatio, uint256 appliedRatio, uint256 lastRatio, bool outOfBounds, bool deltaExceeded
+    );
 
     error NotVault();
     error NotGuardian();
@@ -77,6 +81,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     error InvalidRecoveryToken();
     error InvalidRecipient();
     error InputNotConsumed();
+    error InvalidDeadline();
 
     modifier onlyVault() {
         if (msg.sender != vault) {
@@ -160,6 +165,9 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     }
 
     function setDeadlineSeconds(uint32 newSeconds) external onlyGuardian {
+        if (newSeconds == 0 || newSeconds > MAX_DEADLINE_SECONDS) {
+            revert InvalidDeadline();
+        }
         deadlineSeconds = newSeconds;
     }
 
@@ -251,14 +259,32 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     }
 
     function _resolveRatio(uint256 ratio) internal returns (uint256) {
-        if (_isRatioGood(ratio)) {
-            lastRatio = ratio;
-            return ratio;
+        uint256 clamped = _clampRatio(ratio);
+        if (_isRatioGood(clamped)) {
+            lastRatio = clamped;
+            return clamped;
         }
-        if (lastRatio != 0) {
-            return lastRatio;
+        uint256 applied = clamped;
+        uint256 previous = lastRatio;
+        if (previous != 0) {
+            uint256 maxDelta = (previous * maxRatioChangeBps) / BPS;
+            if (clamped > previous) {
+                applied = previous + maxDelta;
+            } else if (previous > maxDelta) {
+                applied = previous - maxDelta;
+            } else {
+                applied = 0;
+            }
+            applied = _clampRatio(applied);
         }
-        return _clampRatio(ratio);
+        emit RatioFallback(
+            ratio,
+            applied,
+            previous,
+            ratio < minRatio || ratio > maxRatio,
+            previous != 0 && _deltaExceeded(clamped, previous)
+        );
+        return applied;
     }
 
     function _isRatioGood(uint256 ratio) internal view returns (bool) {
@@ -269,9 +295,13 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (previous == 0) {
             return true;
         }
+        return !_deltaExceeded(ratio, previous);
+    }
+
+    function _deltaExceeded(uint256 ratio, uint256 previous) internal view returns (bool) {
         uint256 delta = ratio > previous ? ratio - previous : previous - ratio;
         uint256 maxDelta = (previous * maxRatioChangeBps) / BPS;
-        return delta <= maxDelta;
+        return delta > maxDelta;
     }
 
     function _clampRatio(uint256 ratio) internal view returns (uint256) {
@@ -284,11 +314,11 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         return ratio;
     }
 
-    function _minOutFromExpected(uint256 expectedBnb) internal view returns (uint256) {
-        if (expectedBnb == 0) {
+    function _minOutFromQuote(uint256 quotedOut) internal view returns (uint256) {
+        if (quotedOut == 0) {
             return 0;
         }
-        uint256 afterHaircut = (expectedBnb * (BPS - valuationHaircutBps)) / BPS;
+        uint256 afterHaircut = (quotedOut * (BPS - valuationHaircutBps)) / BPS;
         return (afterHaircut * (BPS - maxSlippageBps)) / BPS;
     }
 
@@ -319,12 +349,15 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         path[1] = address(wbnb);
 
         _ensureAllowance(ankrToSwap);
+        if (deadlineSeconds == 0 || deadlineSeconds > MAX_DEADLINE_SECONDS) {
+            revert InvalidDeadline();
+        }
         uint256 remaining = ankrToSwap;
         uint256 chunkSize = maxChunkAnkr == 0 ? remaining : maxChunkAnkr;
         while (remaining > 0) {
             uint256 chunk = remaining > chunkSize ? chunkSize : remaining;
-            uint256 expectedBnb = (chunk * ratio) / ONE;
-            uint256 amountOutMin = _minOutFromExpected(expectedBnb);
+            uint256[] memory quote = router.getAmountsOut(chunk, path);
+            uint256 amountOutMin = _minOutFromQuote(quote[1]);
             uint256 ankrBefore = ankrBNB.balanceOf(address(this));
 
             router.swapExactTokensForTokens(chunk, amountOutMin, path, address(this), block.timestamp + deadlineSeconds);
