@@ -127,7 +127,6 @@ contract NavBNBv2 {
     error StrategyTimelockNotExpired();
     error StrategyTimelockTooLong();
     error StrategyTimelockEnabled();
-    error TooEarlyForFreeExit();
     error ExitFeeConfigInvalid();
     error MinPayoutOutOfRange();
     error MinQueueEntryOutOfRange();
@@ -383,10 +382,6 @@ contract NavBNBv2 {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
-        uint64 lastDeposit = lastDepositTime[msg.sender];
-        if (lastDeposit != 0 && minExitSeconds != 0 && block.timestamp < uint256(lastDeposit) + minExitSeconds) {
-            revert TooEarlyForFreeExit();
-        }
         uint256 obligations = _totalObligations();
         if (totalAssets() <= obligations) {
             revert Insolvent();
@@ -573,6 +568,13 @@ contract NavBNBv2 {
         return nav();
     }
 
+    function previewDeposit(uint256 bnbIn) external view returns (uint256 sharesOut, uint256 fee, uint256 navBefore) {
+        navBefore = _navWithAssets(totalAssets());
+        fee = (bnbIn * MINT_FEE_BPS) / BPS;
+        uint256 valueAfterFee = bnbIn - fee;
+        sharesOut = (valueAfterFee * 1e18) / navBefore;
+    }
+
     function previewRedeem(address user, uint256 shares)
         external
         view
@@ -586,6 +588,19 @@ contract NavBNBv2 {
         bnbOut = bnbOwed - redeemFee - exitFee;
     }
 
+    function previewRedeem(uint256 sharesIn)
+        external
+        view
+        returns (uint256 bnbOut, uint256 feeBps, uint256 fee, uint256 navValue)
+    {
+        navValue = nav();
+        uint256 bnbOwed = (sharesIn * navValue) / 1e18;
+        uint256 redeemFee = (bnbOwed * REDEEM_FEE_BPS) / BPS;
+        feeBps = exitFeeBps(msg.sender);
+        fee = ((bnbOwed - redeemFee) * feeBps) / BPS;
+        bnbOut = bnbOwed - redeemFee - fee;
+    }
+
     function previewEmergencyRedeem(uint256 shares) external view returns (uint256 bnbOut, uint256 fee) {
         uint256 currentNav = nav();
         uint256 bnbOwed = (shares * currentNav) / 1e18;
@@ -597,20 +612,16 @@ contract NavBNBv2 {
         return exitFeeBps(user);
     }
 
+    function exitFeeFreeAfterSeconds() external view returns (uint256) {
+        return fullExitSeconds;
+    }
+
+    function secondsUntilFeeFree(address user) external view returns (uint256) {
+        return _secondsUntilFeeFree(user);
+    }
+
     function timeUntilZeroExitFee(address user) external view returns (uint256 secondsRemaining) {
-        uint64 lastDeposit = lastDepositTime[user];
-        if (lastDeposit == 0) {
-            return 0;
-        }
-        uint256 fullSeconds = fullExitSeconds;
-        if (fullSeconds == 0) {
-            return 0;
-        }
-        uint256 maturity = uint256(lastDeposit) + fullSeconds;
-        if (block.timestamp >= maturity) {
-            return 0;
-        }
-        return maturity - block.timestamp;
+        return _secondsUntilFeeFree(user);
     }
 
     function maturityTimestamp(address user) public view returns (uint64) {
@@ -748,6 +759,43 @@ contract NavBNBv2 {
         exitFeeBpsValue = exitFeeBps(user);
         maturityTs = maturityTimestamp(user);
         minPayoutWei_ = minPayoutWei;
+    }
+
+    function userPosition(address user)
+        external
+        view
+        returns (
+            uint256 shares,
+            uint256 estimatedBnbValue,
+            uint64 lastDeposit,
+            uint256 currentExitFeeBps,
+            uint256 secondsUntilFree
+        )
+    {
+        shares = balanceOf[user];
+        uint256 navValue = nav();
+        estimatedBnbValue = (shares * navValue) / 1e18;
+        lastDeposit = lastDepositTime[user];
+        currentExitFeeBps = exitFeeBps(user);
+        secondsUntilFree = _secondsUntilFeeFree(user);
+    }
+
+    function liquidityStatus()
+        external
+        view
+        returns (
+            uint256 liquidBNB,
+            uint256 strategyAssets,
+            uint256 obligations,
+            uint256 bufferTarget,
+            uint256 bufferBps
+        )
+    {
+        liquidBNB = address(this).balance;
+        strategyAssets = address(strategy) == address(0) ? 0 : strategy.totalAssets();
+        obligations = _totalObligations();
+        bufferTarget = ((liquidBNB + strategyAssets) * liquidityBufferBPS) / BPS;
+        bufferBps = liquidityBufferBPS;
     }
 
     function _totalObligations() internal view returns (uint256) {
@@ -927,6 +975,22 @@ contract NavBNBv2 {
         }
         trackedAssetsBNB = totalAssets();
         emit ClaimableWithdrawn(msg.sender, payout);
+    }
+
+    function _secondsUntilFeeFree(address user) internal view returns (uint256) {
+        uint64 lastDeposit = lastDepositTime[user];
+        if (lastDeposit == 0) {
+            return 0;
+        }
+        uint256 fullSeconds = fullExitSeconds;
+        if (fullSeconds == 0) {
+            return 0;
+        }
+        uint256 maturity = uint256(lastDeposit) + fullSeconds;
+        if (block.timestamp >= maturity) {
+            return 0;
+        }
+        return maturity - block.timestamp;
     }
 
     function _navWithAssets(uint256 assets) internal view returns (uint256) {

@@ -805,16 +805,25 @@ contract NavBNBv2Test is NoLogBound {
         assertApproxEqAbs(balanceAfter - balanceBefore, expected, 2);
     }
 
-    function testEarlyExitRequiresEmergency() public {
+    function testEarlyExitAppliesFee() public {
         _setExitFeeConfig(1 days, 3 days, 500);
 
         vm.prank(alice);
         nav.deposit{value: 10 ether}(0);
 
         uint256 tokenAmount = nav.balanceOf(alice) / 2;
+        uint256 bnbOwed = (tokenAmount * nav.nav()) / 1e18;
+        uint256 fee = (bnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS();
+        uint256 timeFeeBps = nav.exitFeeBps(alice);
+        uint256 timeFee = ((bnbOwed - fee) * timeFeeBps) / nav.BPS();
+        uint256 expected = bnbOwed - fee - timeFee;
+
+        uint256 balanceBefore = alice.balance;
         vm.prank(alice);
-        vm.expectRevert(NavBNBv2.TooEarlyForFreeExit.selector);
         nav.redeem(tokenAmount, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertApproxEqAbs(balanceAfter - balanceBefore, expected, 2);
 
         vm.prank(alice);
         nav.emergencyRedeem(tokenAmount, 0);
@@ -958,10 +967,13 @@ contract NavBNBv2Test is NoLogBound {
         uint64 depositedAt = nav.lastDepositTime(alice);
         assertEq(nav.maturityTimestamp(alice), depositedAt + 10 days);
         assertEq(nav.timeUntilZeroExitFee(alice), 10 days);
+        assertEq(nav.exitFeeFreeAfterSeconds(), 10 days);
+        assertEq(nav.secondsUntilFeeFree(alice), 10 days);
         assertEq(nav.exitFeeBpsNow(alice), nav.exitFeeBps(alice));
 
         vm.warp(depositedAt + 3 days);
         assertEq(nav.timeUntilZeroExitFee(alice), 7 days);
+        assertEq(nav.secondsUntilFeeFree(alice), 7 days);
     }
 
     function testPreviewRedeemMatchesRedeem() public {
@@ -988,6 +1000,75 @@ contract NavBNBv2Test is NoLogBound {
         uint256 balanceAfter = alice.balance;
 
         assertApproxEqAbs(balanceAfter - balanceBefore, bnbOut, 2);
+    }
+
+    function testPreviewDepositMatchesDeposit() public {
+        (uint256 sharesOut, uint256 fee, uint256 navBefore) = nav.previewDeposit(10 ether);
+        uint256 expectedFee = (10 ether * nav.MINT_FEE_BPS()) / nav.BPS();
+        assertEq(fee, expectedFee);
+        assertEq(navBefore, 1e18);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 minted = nav.balanceOf(alice);
+        assertApproxEqAbs(minted, sharesOut, 1);
+    }
+
+    function testPreviewRedeemViewMatchesRedeem() public {
+        _setExitFeeConfig(0, 10 days, 500);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint64 depositedAt = nav.lastDepositTime(alice);
+        vm.warp(depositedAt + 2 days);
+
+        uint256 shares = nav.balanceOf(alice) / 2;
+        vm.prank(alice);
+        (uint256 bnbOut, uint256 feeBps, uint256 fee, uint256 navValue) = nav.previewRedeem(shares);
+
+        uint256 bnbOwed = (shares * navValue) / 1e18;
+        uint256 redeemFee = (bnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS();
+        assertEq(feeBps, nav.exitFeeBps(alice));
+        assertEq(fee, ((bnbOwed - redeemFee) * feeBps) / nav.BPS());
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.redeem(shares, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertApproxEqAbs(balanceAfter - balanceBefore, bnbOut, 2);
+    }
+
+    function testUserPositionAndLiquidityStatusViews() public {
+        _setExitFeeConfig(0, 10 days, 500);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        (
+            uint256 shares,
+            uint256 estimatedBnbValue,
+            uint64 lastDeposit,
+            uint256 currentExitFeeBps,
+            uint256 secondsUntilFree
+        ) = nav.userPosition(alice);
+
+        assertEq(shares, nav.balanceOf(alice));
+        assertEq(estimatedBnbValue, (shares * nav.nav()) / 1e18);
+        assertEq(lastDeposit, nav.lastDepositTime(alice));
+        assertEq(currentExitFeeBps, nav.exitFeeBps(alice));
+        assertEq(secondsUntilFree, nav.timeUntilZeroExitFee(alice));
+
+        (uint256 liquidBNB, uint256 strategyAssets, uint256 obligations, uint256 bufferTarget, uint256 bufferBps) =
+            nav.liquidityStatus();
+
+        assertEq(liquidBNB, address(nav).balance);
+        assertEq(strategyAssets, 0);
+        assertEq(obligations, nav.totalLiabilitiesBNB() + nav.totalClaimableBNB());
+        assertEq(bufferTarget, ((liquidBNB + strategyAssets) * nav.liquidityBufferBPS()) / nav.BPS());
+        assertEq(bufferBps, nav.liquidityBufferBPS());
     }
 
     function testPreviewEmergencyRedeemMatchesEmergencyRedeem() public {
