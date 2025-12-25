@@ -26,6 +26,8 @@ contract NavBNBv2 {
     uint256 public constant REDEEM_FEE_BPS = 25;
     uint256 public constant EMERGENCY_FEE_BPS = 1_000;
     uint256 public constant DEFAULT_MAX_STEPS = 32;
+    uint256 public constant MIN_PAYOUT_WEI_LOWER = 1;
+    uint256 public constant MIN_PAYOUT_WEI_UPPER = 1e18;
 
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
@@ -35,6 +37,7 @@ contract NavBNBv2 {
     uint256 public totalClaimableBNB;
     uint256 public trackedAssetsBNB;
     mapping(address => uint256) public claimableBNB;
+    uint256 public minPayoutWei;
 
     IBNBYieldStrategy public strategy;
     uint256 public liquidityBufferBPS = 1_000;
@@ -84,6 +87,8 @@ contract NavBNBv2 {
     event LiquidityBufferUpdated(uint256 bps);
     event ExitFeeConfigUpdated(uint256 minSeconds, uint256 fullSeconds, uint256 maxFeeBps);
     event ExitFeeCharged(address indexed account, uint256 feeBps, uint256 feeAmount);
+    event MinPayoutWeiUpdated(uint256 minPayoutWei);
+    event ClaimableWithdrawn(address indexed account, uint256 amount);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -105,14 +110,26 @@ contract NavBNBv2 {
     error StrategyNotContract();
     error StrategyWithdrawFailed();
     error InsufficientLiquidityAfterWithdraw();
-    error InsufficientReserve();
     error NoProgress();
+    error QueueEmpty();
+    error NoLiquidity();
+    error PayoutTooSmall(uint256 payout, uint256 minPayoutWei);
+    error MaxStepsNoProgress();
     error StrategyProposalMissing();
     error StrategyTimelockNotExpired();
     error StrategyTimelockTooLong();
     error StrategyTimelockEnabled();
     error TooEarlyForFreeExit();
     error ExitFeeConfigInvalid();
+    error MinPayoutOutOfRange();
+
+    enum ClaimBlockReason {
+        None,
+        QueueEmpty,
+        NoLiquidity,
+        PayoutTooSmall,
+        MaxStepsNoProgress
+    }
 
     modifier nonReentrant() {
         require(locked == 0, "REENTRANCY");
@@ -137,6 +154,7 @@ contract NavBNBv2 {
         strategyTimelockSeconds = 1 days;
         fullExitSeconds = 30 days;
         maxExitFeeBps = 500;
+        minPayoutWei = 1e14;
     }
 
     receive() external payable {}
@@ -268,6 +286,17 @@ contract NavBNBv2 {
         emit ExitFeeConfigUpdated(minSeconds, fullSeconds, maxFeeBps);
     }
 
+    function setMinPayoutWei(uint256 newMinPayoutWei) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        if (newMinPayoutWei < MIN_PAYOUT_WEI_LOWER || newMinPayoutWei > MIN_PAYOUT_WEI_UPPER) {
+            revert MinPayoutOutOfRange();
+        }
+        minPayoutWei = newMinPayoutWei;
+        emit MinPayoutWeiUpdated(newMinPayoutWei);
+    }
+
     function deposit(uint256 minSharesOut) external payable nonReentrant whenNotPaused {
         if (msg.value == 0) {
             revert ZeroDeposit();
@@ -348,7 +377,7 @@ contract NavBNBv2 {
             bnbQueued = bnbAfterFee;
         } else {
             _ensureLiquidityBestEffort(bnbAfterFee);
-            uint256 liquidAvailable = _redeemableBalance();
+            uint256 liquidAvailable = _queueRedeemableBalance();
             if (liquidAvailable >= bnbAfterFee) {
                 bnbPaid = bnbAfterFee;
             } else {
@@ -378,27 +407,51 @@ contract NavBNBv2 {
     }
 
     function claim() external nonReentrant {
-        _claim(DEFAULT_MAX_STEPS);
+        _claim(DEFAULT_MAX_STEPS, false);
     }
 
     function claim(uint256 maxSteps) external nonReentrant {
-        _claim(maxSteps);
+        _claim(maxSteps, false);
     }
 
-    function _claim(uint256 maxSteps) internal {
+    function claim(uint256 maxSteps, bool acceptDust) external nonReentrant {
+        _claim(maxSteps, acceptDust);
+    }
+
+    function _claim(uint256 maxSteps, bool acceptDust) internal {
         if (totalLiabilitiesBNB == 0) {
-            return;
+            revert QueueEmpty();
+        }
+        if (maxSteps == 0) {
+            revert MaxStepsNoProgress();
         }
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
-        uint256 totalPaid = _payQueueHead(totalLiabilitiesBNB, maxSteps);
+        (uint256 totalPaid, uint256 totalCredited) = _payQueueHead(totalLiabilitiesBNB, maxSteps);
+        uint256 totalProgress = totalPaid + totalCredited;
+        if (totalProgress == 0) {
+            revert NoLiquidity();
+        }
+        _validatePayout(totalProgress, acceptDust);
         if (totalPaid > 0) {
             emit Claim(msg.sender, totalPaid);
         }
     }
 
     function emergencyRedeem(uint256 tokenAmount, uint256 minBnbOut) external nonReentrant whenNotPaused {
+        _emergencyRedeem(tokenAmount, minBnbOut, false);
+    }
+
+    function emergencyRedeem(uint256 tokenAmount, uint256 minBnbOut, bool acceptDust)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        _emergencyRedeem(tokenAmount, minBnbOut, acceptDust);
+    }
+
+    function _emergencyRedeem(uint256 tokenAmount, uint256 minBnbOut, bool acceptDust) internal {
         if (tokenAmount == 0) {
             revert ZeroRedeem();
         }
@@ -412,21 +465,30 @@ contract NavBNBv2 {
         if (bnbOut == 0) {
             revert NoProgress();
         }
-        if (bnbOut < minBnbOut) {
+        _ensureLiquidityBestEffort(bnbOut);
+        uint256 payableOut = _queueRedeemableBalance();
+        if (payableOut > bnbOut) {
+            payableOut = bnbOut;
+        }
+        if (payableOut == 0) {
+            revert NoLiquidity();
+        }
+        _validatePayout(payableOut, acceptDust);
+        if (payableOut < minBnbOut) {
             revert Slippage();
         }
-        if (bnbOut > reserveBNB()) {
-            revert InsufficientReserve();
+        uint256 burnAmount = (tokenAmount * payableOut + bnbOut - 1) / bnbOut;
+        if (burnAmount == 0) {
+            revert NoProgress();
         }
-        _ensureLiquidityExact(bnbOut);
-        (bool success,) = msg.sender.call{value: bnbOut}("");
+        (bool success,) = msg.sender.call{value: payableOut}("");
         if (!success) {
             revert BnbSendFail();
         }
         trackedAssetsBNB = totalAssets();
 
-        _burn(msg.sender, tokenAmount);
-        emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
+        _burn(msg.sender, burnAmount);
+        emit EmergencyRedeem(msg.sender, burnAmount, payableOut, fee);
     }
 
     function _emergencyFee(uint256 bnbOwed) internal pure returns (uint256) {
@@ -512,7 +574,7 @@ contract NavBNBv2 {
         return maturity - block.timestamp;
     }
 
-    function maturityTimestamp(address user) external view returns (uint64) {
+    function maturityTimestamp(address user) public view returns (uint64) {
         uint64 lastDeposit = lastDepositTime[user];
         if (lastDeposit == 0 || fullExitSeconds == 0) {
             return 0;
@@ -526,6 +588,10 @@ contract NavBNBv2 {
 
     function totalObligations() public view returns (uint256) {
         return _totalObligations();
+    }
+
+    function redeemableBalance() public view returns (uint256) {
+        return address(this).balance;
     }
 
     function reserveBNB() public view returns (uint256) {
@@ -579,10 +645,70 @@ contract NavBNBv2 {
         return balance - reserved;
     }
 
-    function _redeemableBalance() internal view returns (uint256) {
+    function _queueRedeemableBalance() internal view returns (uint256) {
         uint256 balance = address(this).balance;
         uint256 reserved = totalClaimableBNB;
         return balance > reserved ? balance - reserved : 0;
+    }
+
+    function queueState() external view returns (uint256 head, uint256 len, address headUser, uint256 headAmount) {
+        head = queueHead;
+        len = queue.length;
+        if (head < len) {
+            QueueEntry storage entry = queue[head];
+            headUser = entry.user;
+            headAmount = entry.amount;
+        }
+    }
+
+    function claimStatus(uint256 maxSteps)
+        external
+        view
+        returns (bool canPay, ClaimBlockReason reason, uint256 expectedPaid, uint256 redeemable, uint256 headAmount)
+    {
+        redeemable = _queueRedeemableBalance();
+        if (totalLiabilitiesBNB == 0 || queueHead >= queue.length) {
+            return (false, ClaimBlockReason.QueueEmpty, 0, redeemable, 0);
+        }
+        if (maxSteps == 0) {
+            QueueEntry storage entry = queue[queueHead];
+            return (false, ClaimBlockReason.MaxStepsNoProgress, 0, redeemable, entry.amount);
+        }
+        uint256 len = queue.length;
+        uint256 head = queueHead;
+        uint256 steps = 0;
+        uint256 remaining = 0;
+        while (head < len && steps < maxSteps) {
+            remaining += queue[head].amount;
+            head++;
+            steps++;
+        }
+        if (remaining > redeemable) {
+            expectedPaid = redeemable;
+        } else {
+            expectedPaid = remaining;
+        }
+        QueueEntry storage headEntry = queue[queueHead];
+        headAmount = headEntry.amount;
+        if (expectedPaid == 0) {
+            return (false, ClaimBlockReason.NoLiquidity, 0, redeemable, headAmount);
+        }
+        if (expectedPaid < minPayoutWei) {
+            return (false, ClaimBlockReason.PayoutTooSmall, expectedPaid, redeemable, headAmount);
+        }
+        return (true, ClaimBlockReason.None, expectedPaid, redeemable, headAmount);
+    }
+
+    function userExitStatus(address user, uint256 shares)
+        external
+        view
+        returns (uint256 navValue, uint256 owed, uint256 exitFeeBpsValue, uint256 maturityTs, uint256 minPayoutWei_)
+    {
+        navValue = nav();
+        owed = (shares * navValue) / 1e18;
+        exitFeeBpsValue = exitFeeBps(user);
+        maturityTs = maturityTimestamp(user);
+        minPayoutWei_ = minPayoutWei;
     }
 
     function _totalObligations() internal view returns (uint256) {
@@ -594,9 +720,9 @@ contract NavBNBv2 {
         totalLiabilitiesBNB += amount;
     }
 
-    function _payQueueHead(uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid) {
+    function _payQueueHead(uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid, uint256 credited) {
         if (maxAmount == 0 || totalLiabilitiesBNB == 0) {
-            return 0;
+            return (0, 0);
         }
         uint256 remainingCap = maxAmount;
         if (remainingCap > totalLiabilitiesBNB) {
@@ -604,7 +730,7 @@ contract NavBNBv2 {
         }
         uint256 payBudget = remainingCap;
         _ensureLiquidityBestEffort(payBudget);
-        uint256 remainingLiquid = _redeemableBalance();
+        uint256 remainingLiquid = _queueRedeemableBalance();
         if (remainingLiquid > remainingCap) {
             remainingLiquid = remainingCap;
         }
@@ -623,16 +749,17 @@ contract NavBNBv2 {
             totalLiabilitiesBNB -= pay;
             (bool success,) = entry.user.call{value: pay}("");
             if (!success) {
-                uint256 credited = pay + entry.amount;
+                uint256 creditedAmount = pay + entry.amount;
                 entry.amount = 0;
-                totalLiabilitiesBNB -= credited - pay;
-                claimableBNB[entry.user] += credited;
-                totalClaimableBNB += credited;
-                emit ClaimableCredited(entry.user, credited);
-                if (credited >= remainingLiquid) {
+                totalLiabilitiesBNB -= creditedAmount - pay;
+                claimableBNB[entry.user] += creditedAmount;
+                totalClaimableBNB += creditedAmount;
+                emit ClaimableCredited(entry.user, creditedAmount);
+                credited += creditedAmount;
+                if (creditedAmount >= remainingLiquid) {
                     remainingLiquid = 0;
                 } else {
-                    remainingLiquid -= credited;
+                    remainingLiquid -= creditedAmount;
                 }
                 head++;
                 steps++;
@@ -710,26 +837,31 @@ contract NavBNBv2 {
     }
 
     function withdrawClaimable(uint256 minOut) external nonReentrant whenNotPaused {
+        _withdrawClaimable(minOut, false);
+    }
+
+    function withdrawClaimable(uint256 minOut, bool acceptDust) external nonReentrant whenNotPaused {
+        _withdrawClaimable(minOut, acceptDust);
+    }
+
+    function _withdrawClaimable(uint256 minOut, bool acceptDust) internal {
         uint256 claimable = claimableBNB[msg.sender];
         if (claimable == 0) {
-            return;
+            revert NoProgress();
         }
         if (totalAssets() < _totalObligations()) {
             revert Insolvent();
         }
-        uint256 assets = totalAssets();
-        uint256 payout = claimable > assets ? assets : claimable;
-        if (payout == 0) {
-            revert NoProgress();
-        }
-        _ensureLiquidityBestEffort(payout);
-        uint256 liquidAvailable = address(this).balance;
+        _ensureLiquidityBestEffort(claimable);
+        uint256 payout = claimable;
+        uint256 liquidAvailable = redeemableBalance();
         if (payout > liquidAvailable) {
             payout = liquidAvailable;
         }
         if (payout == 0) {
-            revert NoProgress();
+            revert NoLiquidity();
         }
+        _validatePayout(payout, acceptDust);
         if (payout < minOut) {
             revert Slippage();
         }
@@ -740,6 +872,7 @@ contract NavBNBv2 {
             revert BnbSendFail();
         }
         trackedAssetsBNB = totalAssets();
+        emit ClaimableWithdrawn(msg.sender, payout);
     }
 
     function _navWithAssets(uint256 assets) internal view returns (uint256) {
@@ -807,6 +940,18 @@ contract NavBNBv2 {
         uint256 received = strategy.withdraw(withdrawAmount);
         if (available > 0 && received == 0) {
             revert StrategyWithdrawFailed();
+        }
+    }
+
+    function _validatePayout(uint256 payout, bool acceptDust) internal view {
+        if (acceptDust) {
+            if (payout == 0) {
+                revert NoLiquidity();
+            }
+            return;
+        }
+        if (payout < minPayoutWei) {
+            revert PayoutTooSmall(payout, minPayoutWei);
         }
     }
 
