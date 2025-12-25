@@ -682,16 +682,15 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testLinearExitFeeDecay() public {
-        _setExitFeeConfig(1 days, 5 days, 500);
+        _setExitFeeConfig(0, 5 days, 500);
 
         vm.prank(alice);
         nav.deposit{value: 1 ether}(0);
 
         uint256 depositedAt = nav.lastDepositTime(alice);
-        vm.warp(depositedAt + 1 days);
         assertEq(nav.exitFeeBps(alice), 500);
 
-        vm.warp(depositedAt + 3 days);
+        vm.warp(depositedAt + 2 days + 12 hours);
         assertApproxEqAbs(nav.exitFeeBps(alice), 250, 1);
 
         vm.warp(depositedAt + 5 days);
@@ -762,6 +761,66 @@ contract NavBNBv2Test is NoLogBound {
         uint256 balanceAfter = alice.balance;
 
         assertApproxEqAbs(balanceAfter - balanceBefore, expected, 2);
+    }
+
+    function testExitFeeViewHelpers() public {
+        _setExitFeeConfig(0, 10 days, 500);
+
+        vm.prank(alice);
+        nav.deposit{value: 2 ether}(0);
+
+        uint64 depositedAt = nav.lastDepositTime(alice);
+        assertEq(nav.maturityTimestamp(alice), depositedAt + 10 days);
+        assertEq(nav.timeUntilZeroExitFee(alice), 10 days);
+        assertEq(nav.exitFeeBpsNow(alice), nav.exitFeeBps(alice));
+
+        vm.warp(depositedAt + 3 days);
+        assertEq(nav.timeUntilZeroExitFee(alice), 7 days);
+    }
+
+    function testPreviewRedeemMatchesRedeem() public {
+        _setExitFeeConfig(0, 10 days, 500);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint64 depositedAt = nav.lastDepositTime(alice);
+        vm.warp(depositedAt + 2 days);
+
+        uint256 shares = nav.balanceOf(alice) / 2;
+        (uint256 bnbOut, uint256 exitFee, uint256 redeemFee) = nav.previewRedeem(alice, shares);
+
+        uint256 currentNav = nav.nav();
+        uint256 bnbOwed = (shares * currentNav) / 1e18;
+        assertEq(redeemFee, (bnbOwed * nav.REDEEM_FEE_BPS()) / nav.BPS());
+        uint256 expectedExitFee = ((bnbOwed - redeemFee) * nav.exitFeeBps(alice)) / nav.BPS();
+        assertEq(exitFee, expectedExitFee);
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.redeem(shares, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertApproxEqAbs(balanceAfter - balanceBefore, bnbOut, 2);
+    }
+
+    function testPreviewEmergencyRedeemMatchesEmergencyRedeem() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 shares = nav.balanceOf(alice) / 2;
+        (uint256 bnbOut, uint256 fee) = nav.previewEmergencyRedeem(shares);
+
+        uint256 currentNav = nav.nav();
+        uint256 bnbOwed = (shares * currentNav) / 1e18;
+        assertEq(fee, _emergencyFee(bnbOwed));
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeem(shares, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertApproxEqAbs(balanceAfter - balanceBefore, bnbOut, 2);
     }
 
     function testRedeemRejectsZeroPayout() public {

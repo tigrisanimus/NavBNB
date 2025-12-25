@@ -12,6 +12,7 @@ interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
 }
 
 interface IWBNB is IERC20 {
@@ -47,6 +48,10 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     uint16 public valuationHaircutBps;
     uint32 public deadlineSeconds;
     uint256 public maxChunkAnkr;
+    uint256 public minRatio;
+    uint256 public maxRatio;
+    uint256 public maxRatioChangeBps;
+    uint256 public lastRatio;
     bool public paused;
     address public recoveryAddress;
 
@@ -72,6 +77,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     error InvalidRecoveryToken();
     error InvalidRecipient();
     error InputNotConsumed();
+    error RatioOutOfBounds();
+    error RatioChangeTooLarge();
 
     modifier onlyVault() {
         if (msg.sender != vault) {
@@ -116,6 +123,9 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         valuationHaircutBps = 100;
         deadlineSeconds = 300;
         maxChunkAnkr = 500 ether;
+        minRatio = 1e18;
+        maxRatio = 2e18;
+        maxRatioChangeBps = 100;
         recoveryAddress = recovery_;
     }
 
@@ -135,6 +145,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (newBps > MAX_SLIPPAGE_BPS) {
             revert SlippageTooHigh();
         }
+        _checkedRatioUpdate(_readRatio());
         uint256 oldBps = maxSlippageBps;
         maxSlippageBps = newBps;
         emit MaxSlippageBpsSet(oldBps, newBps);
@@ -144,6 +155,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (newBps > MAX_VALUATION_HAIRCUT_BPS) {
             revert ValuationHaircutTooHigh();
         }
+        _checkedRatioUpdate(_readRatio());
         uint256 oldBps = valuationHaircutBps;
         valuationHaircutBps = newBps;
         emit ValuationHaircutBpsSet(oldBps, newBps);
@@ -186,15 +198,17 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (msg.value == 0) {
             revert ZeroAmount();
         }
+        _checkedRatioUpdate(_readRatio());
         stakingPool.stakeCerts{value: msg.value}();
     }
 
     function withdraw(uint256 bnbAmount) external onlyVault whenNotPaused returns (uint256 received) {
+        uint256 ratio = _readRatio();
+        _checkedRatioUpdate(ratio);
         if (bnbAmount == 0) {
             return 0;
         }
 
-        uint256 ratio = _exchangeRatio();
         if (ratio == 0) {
             return 0;
         }
@@ -209,7 +223,8 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
 
     function withdrawAllToVault() external onlyVault returns (uint256 received) {
         uint256 ankrBalance = ankrBNB.balanceOf(address(this));
-        uint256 ratio = _exchangeRatio();
+        uint256 ratio = _readRatio();
+        _checkedRatioUpdate(ratio);
         if (ankrBalance > 0) {
             _swapAnkrForBnb(ankrBalance, ratio);
         }
@@ -221,15 +236,30 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     }
 
     function totalAssets() external view returns (uint256) {
-        uint256 ratio = _exchangeRatio();
+        uint256 ratio = _readRatio();
         uint256 ankrBalance = ankrBNB.balanceOf(address(this));
         uint256 bnbValue = ratio == 0 ? 0 : (ankrBalance * ratio) / ONE;
         uint256 adjusted = (bnbValue * (BPS - valuationHaircutBps)) / BPS;
         return address(this).balance + adjusted;
     }
 
-    function _exchangeRatio() internal view returns (uint256) {
+    function _readRatio() internal view returns (uint256) {
         return stakingPool.exchangeRatio();
+    }
+
+    function _checkedRatioUpdate(uint256 ratio) internal {
+        if (ratio < minRatio || ratio > maxRatio) {
+            revert RatioOutOfBounds();
+        }
+        uint256 previous = lastRatio;
+        if (previous != 0) {
+            uint256 delta = ratio > previous ? ratio - previous : previous - ratio;
+            uint256 maxDelta = (previous * maxRatioChangeBps) / BPS;
+            if (delta > maxDelta) {
+                revert RatioChangeTooLarge();
+            }
+        }
+        lastRatio = ratio;
     }
 
     function _minOutFromExpected(uint256 expectedBnb) internal view returns (uint256) {
@@ -241,10 +271,21 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     }
 
     function _mulDivUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
-        uint256 product = a * b;
-        uint256 quotient = product / denominator;
-        uint256 remainder = product % denominator;
-        return remainder == 0 ? quotient : quotient + 1;
+        if (a == 0 || b == 0) {
+            return 0;
+        }
+        uint256 quotient = a / denominator;
+        uint256 remainder = a % denominator;
+        uint256 result = quotient * b;
+        if (remainder == 0) {
+            return result;
+        }
+        uint256 remainderProduct = remainder * b;
+        uint256 extra = remainderProduct / denominator;
+        if (remainderProduct % denominator != 0) {
+            extra += 1;
+        }
+        return result + extra;
     }
 
     function _swapAnkrForBnb(uint256 ankrToSwap, uint256 ratio) internal {
@@ -255,6 +296,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         path[0] = address(ankrBNB);
         path[1] = address(wbnb);
 
+        _ensureAllowance(ankrToSwap);
         uint256 remaining = ankrToSwap;
         uint256 chunkSize = maxChunkAnkr == 0 ? remaining : maxChunkAnkr;
         while (remaining > 0) {
@@ -263,27 +305,20 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
             uint256 amountOutMin = _minOutFromExpected(expectedBnb);
             uint256 ankrBefore = ankrBNB.balanceOf(address(this));
 
-            _approve(ankrBNB, address(router), chunk);
             router.swapExactTokensForTokens(chunk, amountOutMin, path, address(this), block.timestamp + deadlineSeconds);
-            _approve(ankrBNB, address(router), 0);
 
             uint256 ankrAfter = ankrBNB.balanceOf(address(this));
             if (ankrBefore - ankrAfter != chunk) {
                 revert InputNotConsumed();
             }
-            uint256 wbnbBalance = wbnb.balanceOf(address(this));
-            if (wbnbBalance > 0) {
-                wbnb.withdraw(wbnbBalance);
-            }
+            _unwrapWbnbBalance();
             remaining -= chunk;
         }
+        _unwrapWbnbBalance();
     }
 
     function _sendAllBnbToVault() internal returns (uint256 bnbOut) {
-        uint256 wbnbBalance = wbnb.balanceOf(address(this));
-        if (wbnbBalance > 0) {
-            wbnb.withdraw(wbnbBalance);
-        }
+        _unwrapWbnbBalance();
         bnbOut = address(this).balance;
         if (bnbOut > 0) {
             (bool success,) = vault.call{value: bnbOut}("");
@@ -298,6 +333,24 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
             address(token).call(abi.encodeWithSelector(token.approve.selector, spender, amount));
         if (!success || (data.length != 0 && !abi.decode(data, (bool)))) {
             revert ApprovalFailed();
+        }
+    }
+
+    function _ensureAllowance(uint256 amount) internal {
+        uint256 current = ankrBNB.allowance(address(this), address(router));
+        if (current >= amount) {
+            return;
+        }
+        if (current != 0) {
+            _approve(ankrBNB, address(router), 0);
+        }
+        _approve(ankrBNB, address(router), type(uint256).max);
+    }
+
+    function _unwrapWbnbBalance() internal {
+        uint256 wbnbBalance = wbnb.balanceOf(address(this));
+        if (wbnbBalance > 0) {
+            wbnb.withdraw(wbnbBalance);
         }
     }
 }

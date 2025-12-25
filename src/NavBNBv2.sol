@@ -407,19 +407,7 @@ contract NavBNBv2 {
         }
         uint256 currentNav = nav();
         uint256 bnbOwed = (tokenAmount * currentNav) / 1e18;
-        uint256 quotient = bnbOwed / BPS;
-        uint256 remainder = bnbOwed % BPS;
-        uint256 fee = quotient * EMERGENCY_FEE_BPS;
-        uint256 remainderFee = remainder * EMERGENCY_FEE_BPS;
-        if (remainderFee != 0) {
-            fee += (remainderFee + BPS - 1) / BPS;
-        }
-        if (fee > bnbOwed) {
-            fee = bnbOwed;
-        }
-        if (bnbOwed > 0 && fee >= bnbOwed) {
-            fee = bnbOwed - 1;
-        }
+        uint256 fee = _emergencyFee(bnbOwed);
         uint256 bnbOut = bnbOwed - fee;
         if (bnbOut == 0) {
             revert NoProgress();
@@ -439,6 +427,23 @@ contract NavBNBv2 {
 
         _burn(msg.sender, tokenAmount);
         emit EmergencyRedeem(msg.sender, tokenAmount, bnbOut, fee);
+    }
+
+    function _emergencyFee(uint256 bnbOwed) internal pure returns (uint256) {
+        uint256 quotient = bnbOwed / BPS;
+        uint256 remainder = bnbOwed % BPS;
+        uint256 fee = quotient * EMERGENCY_FEE_BPS;
+        uint256 remainderFee = remainder * EMERGENCY_FEE_BPS;
+        if (remainderFee != 0) {
+            fee += (remainderFee + BPS - 1) / BPS;
+        }
+        if (fee > bnbOwed) {
+            fee = bnbOwed;
+        }
+        if (bnbOwed > 0 && fee >= bnbOwed) {
+            fee = bnbOwed - 1;
+        }
+        return fee;
     }
 
     function recoverSurplus(address to) external nonReentrant {
@@ -461,6 +466,62 @@ contract NavBNBv2 {
 
     function nav() public view returns (uint256) {
         return _navWithAssets(totalAssets());
+    }
+
+    function navPerShare() external view returns (uint256) {
+        return nav();
+    }
+
+    function previewRedeem(address user, uint256 shares)
+        external
+        view
+        returns (uint256 bnbOut, uint256 exitFee, uint256 redeemFee)
+    {
+        uint256 currentNav = nav();
+        uint256 bnbOwed = (shares * currentNav) / 1e18;
+        redeemFee = (bnbOwed * REDEEM_FEE_BPS) / BPS;
+        uint256 feeBps = exitFeeBps(user);
+        exitFee = ((bnbOwed - redeemFee) * feeBps) / BPS;
+        bnbOut = bnbOwed - redeemFee - exitFee;
+    }
+
+    function previewEmergencyRedeem(uint256 shares) external view returns (uint256 bnbOut, uint256 fee) {
+        uint256 currentNav = nav();
+        uint256 bnbOwed = (shares * currentNav) / 1e18;
+        fee = _emergencyFee(bnbOwed);
+        bnbOut = bnbOwed - fee;
+    }
+
+    function exitFeeBpsNow(address user) external view returns (uint256) {
+        return exitFeeBps(user);
+    }
+
+    function timeUntilZeroExitFee(address user) external view returns (uint256 secondsRemaining) {
+        uint64 lastDeposit = lastDepositTime[user];
+        if (lastDeposit == 0) {
+            return 0;
+        }
+        uint256 fullSeconds = fullExitSeconds;
+        if (fullSeconds == 0) {
+            return 0;
+        }
+        uint256 maturity = uint256(lastDeposit) + fullSeconds;
+        if (block.timestamp >= maturity) {
+            return 0;
+        }
+        return maturity - block.timestamp;
+    }
+
+    function maturityTimestamp(address user) external view returns (uint64) {
+        uint64 lastDeposit = lastDepositTime[user];
+        if (lastDeposit == 0 || fullExitSeconds == 0) {
+            return 0;
+        }
+        uint256 maturity = uint256(lastDeposit) + fullExitSeconds;
+        if (maturity > type(uint64).max) {
+            return type(uint64).max;
+        }
+        return uint64(maturity);
     }
 
     function totalObligations() public view returns (uint256) {
@@ -489,22 +550,24 @@ contract NavBNBv2 {
         if (lastDeposit == 0) {
             return 0;
         }
-        uint256 minSeconds = minExitSeconds;
         uint256 fullSeconds = fullExitSeconds;
-        if (fullSeconds <= minSeconds) {
+        if (fullSeconds == 0) {
             return 0;
         }
-        uint256 start = uint256(lastDeposit) + minSeconds;
-        if (block.timestamp < start) {
-            return maxExitFeeBps;
-        }
-        uint256 end = uint256(lastDeposit) + fullSeconds;
-        if (block.timestamp >= end) {
+        uint256 elapsed = block.timestamp - uint256(lastDeposit);
+        if (elapsed >= fullSeconds) {
             return 0;
         }
-        uint256 remaining = end - block.timestamp;
-        uint256 duration = fullSeconds - minSeconds;
-        return (maxExitFeeBps * remaining) / duration;
+        uint256 remaining = fullSeconds - elapsed;
+        uint256 numerator = maxExitFeeBps * remaining;
+        uint256 fee = numerator / fullSeconds;
+        if (numerator % fullSeconds != 0) {
+            fee += 1;
+        }
+        if (fee > maxExitFeeBps) {
+            fee = maxExitFeeBps;
+        }
+        return fee;
     }
 
     function untrackedSurplusBNB() public view returns (uint256) {
