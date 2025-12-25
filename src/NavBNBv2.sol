@@ -26,8 +26,13 @@ contract NavBNBv2 {
     uint256 public constant REDEEM_FEE_BPS = 25;
     uint256 public constant EMERGENCY_FEE_BPS = 1_000;
     uint256 public constant DEFAULT_MAX_STEPS = 32;
+    uint256 public constant AUTO_COMPACT_HEAD_THRESHOLD = 32;
+    uint256 public constant AUTO_COMPACT_MAX_MOVES = 64;
+    uint256 public constant MAX_GAS_PER_PAY = 30_000;
     uint256 public constant MIN_PAYOUT_WEI_LOWER = 1;
     uint256 public constant MIN_PAYOUT_WEI_UPPER = 1e18;
+    uint256 public constant MIN_QUEUE_ENTRY_WEI_LOWER = 1;
+    uint256 public constant MIN_QUEUE_ENTRY_WEI_UPPER = 1e18;
 
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
@@ -38,6 +43,7 @@ contract NavBNBv2 {
     uint256 public trackedAssetsBNB;
     mapping(address => uint256) public claimableBNB;
     uint256 public minPayoutWei;
+    uint256 public minQueueEntryWei;
 
     IBNBYieldStrategy public strategy;
     uint256 public liquidityBufferBPS = 1_000;
@@ -88,6 +94,7 @@ contract NavBNBv2 {
     event ExitFeeConfigUpdated(uint256 minSeconds, uint256 fullSeconds, uint256 maxFeeBps);
     event ExitFeeCharged(address indexed account, uint256 feeBps, uint256 feeAmount);
     event MinPayoutWeiUpdated(uint256 minPayoutWei);
+    event MinQueueEntryWeiUpdated(uint256 minQueueEntryWei);
     event ClaimableWithdrawn(address indexed account, uint256 amount);
 
     error ZeroDeposit();
@@ -111,6 +118,7 @@ contract NavBNBv2 {
     error StrategyWithdrawFailed();
     error InsufficientLiquidityAfterWithdraw();
     error NoProgress();
+    error RedeemTooSmall();
     error QueueEmpty();
     error NoLiquidity();
     error PayoutTooSmall(uint256 payout, uint256 minPayoutWei);
@@ -122,6 +130,9 @@ contract NavBNBv2 {
     error TooEarlyForFreeExit();
     error ExitFeeConfigInvalid();
     error MinPayoutOutOfRange();
+    error MinQueueEntryOutOfRange();
+    error DirectBnbNotAccepted();
+    error StrategyTokenQueryFailed(address strategy, bytes4 selector);
 
     enum ClaimBlockReason {
         None,
@@ -155,9 +166,26 @@ contract NavBNBv2 {
         fullExitSeconds = 30 days;
         maxExitFeeBps = 500;
         minPayoutWei = 1e14;
+        minQueueEntryWei = 1e14;
     }
 
-    receive() external payable {}
+    receive() external payable {
+        address strategyAddress = address(strategy);
+        if (msg.sender == strategyAddress) {
+            return;
+        }
+        if (strategyAddress != address(0)) {
+            (bool success, bytes memory data) =
+                strategyAddress.staticcall(abi.encodeWithSelector(IAnkrStrategyTokens.wbnb.selector));
+            if (success && data.length == 32) {
+                address token = abi.decode(data, (address));
+                if (msg.sender == token) {
+                    return;
+                }
+            }
+        }
+        revert DirectBnbNotAccepted();
+    }
 
     function approve(address spender, uint256 amount) external nonReentrant returns (bool) {
         allowance[msg.sender][spender] = amount;
@@ -295,6 +323,17 @@ contract NavBNBv2 {
         }
         minPayoutWei = newMinPayoutWei;
         emit MinPayoutWeiUpdated(newMinPayoutWei);
+    }
+
+    function setMinQueueEntryWei(uint256 newMinQueueEntryWei) external nonReentrant {
+        if (msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        if (newMinQueueEntryWei < MIN_QUEUE_ENTRY_WEI_LOWER || newMinQueueEntryWei > MIN_QUEUE_ENTRY_WEI_UPPER) {
+            revert MinQueueEntryOutOfRange();
+        }
+        minQueueEntryWei = newMinQueueEntryWei;
+        emit MinQueueEntryWeiUpdated(newMinQueueEntryWei);
     }
 
     function deposit(uint256 minSharesOut) external payable nonReentrant whenNotPaused {
@@ -716,6 +755,9 @@ contract NavBNBv2 {
     }
 
     function _enqueue(address user, uint256 amount) internal {
+        if (amount < minQueueEntryWei) {
+            revert RedeemTooSmall();
+        }
         queue.push(QueueEntry({user: user, amount: amount}));
         totalLiabilitiesBNB += amount;
     }
@@ -747,7 +789,7 @@ contract NavBNBv2 {
             }
             entry.amount -= pay;
             totalLiabilitiesBNB -= pay;
-            (bool success,) = entry.user.call{value: pay}("");
+            (bool success,) = entry.user.call{value: pay, gas: MAX_GAS_PER_PAY}("");
             if (!success) {
                 uint256 creditedAmount = pay + entry.amount;
                 entry.amount = 0;
@@ -777,6 +819,7 @@ contract NavBNBv2 {
             }
         }
         queueHead = head;
+        _autoCompact(AUTO_COMPACT_MAX_MOVES);
         if (paid > 0) {
             trackedAssetsBNB = totalAssets();
         }
@@ -792,6 +835,17 @@ contract NavBNBv2 {
     }
 
     function compactQueue(uint256 maxMoves) external nonReentrant {
+        _compactQueue(maxMoves);
+    }
+
+    function _autoCompact(uint256 maxMoves) internal {
+        if (queueHead < AUTO_COMPACT_HEAD_THRESHOLD) {
+            return;
+        }
+        _compactQueue(maxMoves);
+    }
+
+    function _compactQueue(uint256 maxMoves) internal {
         uint256 head = queueHead;
         if (head == 0 || maxMoves == 0) {
             return;
@@ -967,9 +1021,11 @@ contract NavBNBv2 {
         balanceOf[to] += amount;
         if (amount > 0) {
             uint64 fromLastDeposit = lastDepositTime[from];
-            uint64 toLastDeposit = lastDepositTime[to];
-            if (fromLastDeposit > toLastDeposit) {
-                lastDepositTime[to] = fromLastDeposit;
+            if (fromLastDeposit != 0) {
+                uint64 toLastDeposit = lastDepositTime[to];
+                if (toLastDeposit == 0 || fromLastDeposit > toLastDeposit) {
+                    lastDepositTime[to] = fromLastDeposit;
+                }
             }
         }
         emit Transfer(from, to, amount);
@@ -1006,7 +1062,7 @@ contract NavBNBv2 {
     function _requireTokenBalanceEmpty(address strategyAddress, bytes4 selector) internal view {
         (bool success, bytes memory data) = strategyAddress.staticcall(abi.encodeWithSelector(selector));
         if (!success || data.length != 32) {
-            return;
+            revert StrategyTokenQueryFailed(strategyAddress, selector);
         }
         address token = abi.decode(data, (address));
         if (token == address(0)) {

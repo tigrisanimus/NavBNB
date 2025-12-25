@@ -77,8 +77,6 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
     error InvalidRecoveryToken();
     error InvalidRecipient();
     error InputNotConsumed();
-    error RatioOutOfBounds();
-    error RatioChangeTooLarge();
 
     modifier onlyVault() {
         if (msg.sender != vault) {
@@ -145,7 +143,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (newBps > MAX_SLIPPAGE_BPS) {
             revert SlippageTooHigh();
         }
-        _checkedRatioUpdate(_readRatio());
+        _updateLastGoodRatio(_readRatio());
         uint256 oldBps = maxSlippageBps;
         maxSlippageBps = newBps;
         emit MaxSlippageBpsSet(oldBps, newBps);
@@ -155,7 +153,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (newBps > MAX_VALUATION_HAIRCUT_BPS) {
             revert ValuationHaircutTooHigh();
         }
-        _checkedRatioUpdate(_readRatio());
+        _updateLastGoodRatio(_readRatio());
         uint256 oldBps = valuationHaircutBps;
         valuationHaircutBps = newBps;
         emit ValuationHaircutBpsSet(oldBps, newBps);
@@ -198,13 +196,12 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         if (msg.value == 0) {
             revert ZeroAmount();
         }
-        _checkedRatioUpdate(_readRatio());
+        _updateLastGoodRatio(_readRatio());
         stakingPool.stakeCerts{value: msg.value}();
     }
 
     function withdraw(uint256 bnbAmount) external onlyVault whenNotPaused returns (uint256 received) {
-        uint256 ratio = _readRatio();
-        _checkedRatioUpdate(ratio);
+        uint256 ratio = _resolveRatio(_readRatio());
         if (bnbAmount == 0) {
             return 0;
         }
@@ -223,8 +220,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
 
     function withdrawAllToVault() external onlyVault returns (uint256 received) {
         uint256 ankrBalance = ankrBNB.balanceOf(address(this));
-        uint256 ratio = _readRatio();
-        _checkedRatioUpdate(ratio);
+        uint256 ratio = _resolveRatio(_readRatio());
         if (ankrBalance > 0) {
             _swapAnkrForBnb(ankrBalance, ratio);
         }
@@ -247,19 +243,45 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         return stakingPool.exchangeRatio();
     }
 
-    function _checkedRatioUpdate(uint256 ratio) internal {
-        if (ratio < minRatio || ratio > maxRatio) {
-            revert RatioOutOfBounds();
-        }
-        uint256 previous = lastRatio;
-        if (previous != 0) {
-            uint256 delta = ratio > previous ? ratio - previous : previous - ratio;
-            uint256 maxDelta = (previous * maxRatioChangeBps) / BPS;
-            if (delta > maxDelta) {
-                revert RatioChangeTooLarge();
-            }
+    function _updateLastGoodRatio(uint256 ratio) internal {
+        if (!_isRatioGood(ratio)) {
+            return;
         }
         lastRatio = ratio;
+    }
+
+    function _resolveRatio(uint256 ratio) internal returns (uint256) {
+        if (_isRatioGood(ratio)) {
+            lastRatio = ratio;
+            return ratio;
+        }
+        if (lastRatio != 0) {
+            return lastRatio;
+        }
+        return _clampRatio(ratio);
+    }
+
+    function _isRatioGood(uint256 ratio) internal view returns (bool) {
+        if (ratio < minRatio || ratio > maxRatio) {
+            return false;
+        }
+        uint256 previous = lastRatio;
+        if (previous == 0) {
+            return true;
+        }
+        uint256 delta = ratio > previous ? ratio - previous : previous - ratio;
+        uint256 maxDelta = (previous * maxRatioChangeBps) / BPS;
+        return delta <= maxDelta;
+    }
+
+    function _clampRatio(uint256 ratio) internal view returns (uint256) {
+        if (ratio < minRatio) {
+            return minRatio;
+        }
+        if (ratio > maxRatio) {
+            return maxRatio;
+        }
+        return ratio;
     }
 
     function _minOutFromExpected(uint256 expectedBnb) internal view returns (uint256) {
