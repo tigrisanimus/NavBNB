@@ -127,7 +127,7 @@ contract AnkrBNBYieldStrategyTest is Test {
 
     function testTotalAssetsAppliesValuationHaircut() public {
         strategy.deposit{value: 10 ether}();
-        pool.setExchangeRatio((ONE * 11) / 10);
+        pool.setExchangeRatio((ONE * 101) / 100);
 
         vm.prank(guardian);
         strategy.setValuationHaircutBps(500);
@@ -240,14 +240,26 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertEq(router.lastDeadline(), expectedDeadline);
     }
 
+    function testSwapDeadlineUsesDefaultBuffer() public {
+        strategy.deposit{value: 1 ether}();
+
+        uint256 expectedDeadline = block.timestamp + 300;
+        strategy.withdraw(1 ether);
+        assertEq(router.lastDeadline(), expectedDeadline);
+    }
+
     function testSwapChunkingSplitsLargeSwap() public {
         strategy.deposit{value: 10 ether}();
         vm.prank(guardian);
         strategy.setMaxChunkAnkr(2 ether);
 
-        strategy.withdraw(9 ether);
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(9 ether);
+        uint256 balanceAfter = address(this).balance;
 
         assertGt(router.swapCallCount(), 1);
+        assertEq(received, balanceAfter - balanceBefore);
+        assertEq(received, 9 ether);
     }
 
     function testMulDivUpHandlesLargeValues() public {
@@ -271,6 +283,41 @@ contract AnkrBNBYieldStrategyTest is Test {
 
         assertEq(received, balanceAfter - balanceBefore);
         assertEq(received, 1 ether);
+    }
+
+    function testDepositRejectsRatioOutOfBounds() public {
+        pool.setExchangeRatio(0);
+
+        vm.expectRevert(AnkrBNBYieldStrategy.RatioOutOfBounds.selector);
+        strategy.deposit{value: 1 ether}();
+    }
+
+    function testWithdrawRejectsRatioOutOfBounds() public {
+        strategy.deposit{value: 1 ether}();
+        pool.setExchangeRatio(3e18);
+
+        vm.expectRevert(AnkrBNBYieldStrategy.RatioOutOfBounds.selector);
+        strategy.withdraw(1 ether);
+    }
+
+    function testWithdrawRejectsRatioJump() public {
+        strategy.deposit{value: 1 ether}();
+        pool.setExchangeRatio((ONE * 102) / 100);
+
+        vm.expectRevert(AnkrBNBYieldStrategy.RatioChangeTooLarge.selector);
+        strategy.withdraw(1 ether);
+    }
+
+    function testWbnbDustIsUnwrappedOnWithdraw() public {
+        strategy.deposit{value: 1 ether}();
+        wbnb.mint(address(strategy), 1 ether);
+
+        uint256 balanceBefore = address(this).balance;
+        uint256 received = strategy.withdraw(1 ether);
+        uint256 balanceAfter = address(this).balance;
+
+        assertEq(received, balanceAfter - balanceBefore);
+        assertEq(received, 2 ether);
     }
 }
 
