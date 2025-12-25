@@ -314,11 +314,12 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         return ratio;
     }
 
-    function _minOutFromQuote(uint256 quotedOut) internal view returns (uint256) {
-        if (quotedOut == 0) {
+    function _minOutFromRatio(uint256 ankrIn, uint256 ratio) internal view returns (uint256) {
+        if (ankrIn == 0 || ratio == 0) {
             return 0;
         }
-        uint256 afterHaircut = (quotedOut * (BPS - valuationHaircutBps)) / BPS;
+        uint256 expectedOut = (ankrIn * ratio) / ONE;
+        uint256 afterHaircut = (expectedOut * (BPS - valuationHaircutBps)) / BPS;
         return (afterHaircut * (BPS - maxSlippageBps)) / BPS;
     }
 
@@ -356,8 +357,7 @@ contract AnkrBNBYieldStrategy is IBNBYieldStrategy {
         uint256 chunkSize = maxChunkAnkr == 0 ? remaining : maxChunkAnkr;
         while (remaining > 0) {
             uint256 chunk = remaining > chunkSize ? chunkSize : remaining;
-            uint256[] memory quote = router.getAmountsOut(chunk, path);
-            uint256 amountOutMin = _minOutFromQuote(quote[1]);
+            uint256 amountOutMin = _minOutFromRatio(chunk, ratio);
             uint256 ankrBefore = ankrBNB.balanceOf(address(this));
 
             router.swapExactTokensForTokens(chunk, amountOutMin, path, address(this), block.timestamp + deadlineSeconds);

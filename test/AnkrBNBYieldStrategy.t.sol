@@ -57,15 +57,15 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertGt(strategy.totalAssets(), 10 ether);
     }
 
-    function testWithdrawUsesRouterQuoteForMinOut() public {
+    function testWithdrawUsesRatioForMinOut() public {
         strategy.deposit{value: 10 ether}();
 
         vm.prank(guardian);
         strategy.setMaxSlippageBps(100);
 
         pool.setExchangeRatio(2e18);
-        router.setRate((1e18 * 2) / 10);
-        router.setLiquidityOut((1 ether * 2) / 10);
+        router.setRate(2e18);
+        router.setLiquidityOut(2 ether);
 
         uint256 balanceBefore = address(this).balance;
         uint256 received = strategy.withdraw(1 ether);
@@ -73,6 +73,10 @@ contract AnkrBNBYieldStrategyTest is Test {
 
         assertEq(received, balanceAfter - balanceBefore);
         assertGt(received, 0);
+        uint256 expectedOut = (5e17 * pool.exchangeRatio()) / ONE;
+        uint256 afterHaircut = (expectedOut * (strategy.BPS() - strategy.valuationHaircutBps())) / strategy.BPS();
+        uint256 expectedMinOut = (afterHaircut * (strategy.BPS() - strategy.maxSlippageBps())) / strategy.BPS();
+        assertEq(router.lastAmountOutMin(), expectedMinOut);
     }
 
     function testWithdrawCanReturnPartialWhenLiquidityLimited() public {
