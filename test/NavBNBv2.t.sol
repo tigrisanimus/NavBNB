@@ -33,6 +33,10 @@ contract ToggleReceiver {
         nav.withdrawClaimable(minOut);
     }
 
+    function withdrawClaimable(uint256 minOut, bool acceptDust) external {
+        nav.withdrawClaimable(minOut, acceptDust);
+    }
+
     receive() external payable {
         if (shouldRevert) {
             revert("NO_RECEIVE");
@@ -89,6 +93,8 @@ contract NavBNBv2Test is NoLogBound {
         nav = new NavBNBv2(guardian, recovery);
         vm.prank(guardian);
         nav.setExitFeeConfig(0, 1 days, 0);
+        vm.prank(guardian);
+        nav.setMinPayoutWei(1);
         vm.deal(alice, 1_000 ether);
         vm.deal(bob, 1_000 ether);
         vm.deal(guardian, 1_000 ether);
@@ -106,6 +112,11 @@ contract NavBNBv2Test is NoLogBound {
     function _setExitFeeConfig(uint256 minSeconds, uint256 fullSeconds, uint256 maxFeeBps) internal {
         vm.prank(guardian);
         nav.setExitFeeConfig(minSeconds, fullSeconds, maxFeeBps);
+    }
+
+    function _setMinPayout(uint256 newMin) internal {
+        vm.prank(guardian);
+        nav.setMinPayoutWei(newMin);
     }
 
     function _emergencyFee(uint256 bnbOwed) internal view returns (uint256) {
@@ -130,7 +141,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function _setQueueLength(uint256 length) internal {
-        vm.store(address(nav), bytes32(uint256(16)), bytes32(length));
+        vm.store(address(nav), bytes32(uint256(17)), bytes32(length));
     }
 
     function _setQueueHead(uint256 head) internal {
@@ -138,7 +149,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function _setQueueEntry(uint256 index, address user, uint256 amount) internal {
-        bytes32 base = keccak256(abi.encode(uint256(16)));
+        bytes32 base = keccak256(abi.encode(uint256(17)));
         uint256 offset = index * 2;
         vm.store(address(nav), bytes32(uint256(base) + offset), bytes32(uint256(uint160(user))));
         vm.store(address(nav), bytes32(uint256(base) + offset + 1), bytes32(amount));
@@ -1163,6 +1174,7 @@ contract NavBNBv2Test is NoLogBound {
 
         uint256 receiverBalanceBefore = address(bad).balance;
         vm.prank(alice);
+        vm.expectRevert(NavBNBv2.QueueEmpty.selector);
         nav.claim(1);
         assertEq(address(bad).balance, receiverBalanceBefore);
     }
@@ -1273,10 +1285,94 @@ contract NavBNBv2Test is NoLogBound {
         stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(uint256(0));
 
         vm.prank(alice);
-        vm.expectRevert(NavBNBv2.NoProgress.selector);
+        vm.expectRevert(NavBNBv2.NoLiquidity.selector);
         nav.withdrawClaimable(0);
 
         assertEq(nav.claimableBNB(alice), 1);
+    }
+
+    function testWithdrawClaimableBestEffortKeepsRemainder() public {
+        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+        mock.setAssets(3 ether);
+        mock.setMaxWithdraw(1 ether);
+        vm.deal(address(mock), 3 ether);
+        stdstore.target(address(nav)).sig("claimableBNB(address)").with_key(alice).checked_write(2 ether);
+        stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(2 ether);
+        _seedQueue(bob, 1, 1 ether);
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.withdrawClaimable(0, true);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, 1 ether);
+        assertEq(nav.claimableBNB(alice), 1 ether);
+        assertEq(nav.totalClaimableBNB(), 1 ether);
+    }
+
+    function testClaimRejectsDustWithoutAccept() public {
+        _setMinPayout(1 ether);
+        vm.deal(address(nav), 0.5 ether);
+        _seedQueue(alice, 1, 0.5 ether);
+
+        uint256 headBefore = nav.queueHead();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(NavBNBv2.PayoutTooSmall.selector, 0.5 ether, 1 ether));
+        nav.claim(1, false);
+        assertEq(nav.queueHead(), headBefore);
+    }
+
+    function testClaimAcceptsDustWithOverride() public {
+        _setMinPayout(1 ether);
+        vm.deal(address(nav), 0.5 ether);
+        _seedQueue(alice, 1, 0.5 ether);
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.claim(1, true);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, 0.5 ether);
+    }
+
+    function testEmergencyRedeemIgnoresQueueState() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+        _seedQueue(bob, 1, 1 ether);
+
+        uint256 shares = nav.balanceOf(alice) / 2;
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeem(shares, 0);
+        uint256 balanceAfter = alice.balance;
+
+        assertGt(balanceAfter - balanceBefore, 0);
+        assertGt(nav.totalLiabilitiesBNB(), 0);
+    }
+
+    function testDepositAllowedWithQueue() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+        _seedQueue(alice, 1, 1 ether);
+
+        vm.prank(bob);
+        nav.deposit{value: 1 ether}(0);
+        assertGt(nav.balanceOf(bob), 0);
+    }
+
+    function testEmergencyRedeemRejectsDustPayout() public {
+        _setMinPayout(1 ether);
+        vm.prank(alice);
+        nav.deposit{value: 1 ether}(0);
+
+        uint256 shares = nav.balanceOf(alice) / 2;
+        vm.prank(alice);
+        (uint256 bnbOut,) = nav.previewEmergencyRedeem(shares);
+        vm.expectRevert(abi.encodeWithSelector(NavBNBv2.PayoutTooSmall.selector, bnbOut, 1 ether));
+        nav.emergencyRedeem(shares, 0);
     }
 
     function testEmergencyRedeemRoundsUpFee() public {
@@ -1466,6 +1562,8 @@ contract NavBNBv2InvariantTest is StdInvariant, Test {
         nav = new NavBNBv2(address(0xBEEF), address(0xCAFE));
         vm.prank(address(0xBEEF));
         nav.setExitFeeConfig(0, 1 days, 0);
+        vm.prank(address(0xBEEF));
+        nav.setMinPayoutWei(1);
         address[] memory users = new address[](4);
         users[0] = address(0xA11CE);
         users[1] = address(0xB0B);
@@ -1510,5 +1608,19 @@ contract NavBNBv2InvariantTest is StdInvariant, Test {
 
     function invariantTrackedAssetsBelowBalance() public view {
         assertLe(nav.trackedAssetsBNB(), nav.totalAssets());
+    }
+
+    function invariantTotalAssetsAboveObligations() public view {
+        assertGe(nav.totalAssets(), nav.totalObligations());
+    }
+
+    function invariantClaimableTotalMatchesSum() public view {
+        uint256 claimableSum;
+        uint256 participants = handler.participantCount();
+        for (uint256 i = 0; i < participants; i++) {
+            address participant = handler.participants(i);
+            claimableSum += nav.claimableBNB(participant);
+        }
+        assertEq(nav.totalClaimableBNB(), claimableSum);
     }
 }
