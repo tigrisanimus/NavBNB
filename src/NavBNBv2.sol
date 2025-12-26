@@ -429,8 +429,12 @@ contract NavBNBv2 {
         if (totalLiabilitiesBNB > 0) {
             bnbQueued = bnbAfterFee;
         } else {
+            uint256 balanceBefore = address(this).balance;
             _ensureLiquidityBestEffort(bnbAfterFee);
             uint256 liquidAvailable = _queueRedeemableBalance();
+            if (totalClaimableBNB == 0) {
+                liquidAvailable = balanceBefore;
+            }
             if (liquidAvailable >= bnbAfterFee) {
                 bnbPaid = bnbAfterFee;
             } else {
@@ -447,9 +451,11 @@ contract NavBNBv2 {
             _ensureLiquidityBestEffort(bnbPaid);
             (bool success,) = msg.sender.call{value: bnbPaid}("");
             if (!success) {
-                revert BnbSendFail();
+                _creditClaimable(msg.sender, bnbPaid);
+                bnbPaid = 0;
+            } else {
+                trackedAssetsBNB = totalAssets();
             }
-            trackedAssetsBNB = totalAssets();
         }
 
         _burn(msg.sender, tokenAmount);
@@ -499,7 +505,7 @@ contract NavBNBv2 {
                 revert PayoutTooSmall(expectedPaid, minPayoutWei);
             }
         }
-        (uint256 totalPaid, uint256 totalCredited) = _payQueueHead(totalLiabilitiesBNB, maxSteps);
+        (uint256 totalPaid, uint256 totalCredited) = _payQueueHead(totalLiabilitiesBNB, maxSteps, acceptDust);
         uint256 totalProgress = totalPaid + totalCredited;
         if (totalProgress == 0) {
             revert NoLiquidity();
@@ -942,6 +948,13 @@ contract NavBNBv2 {
     }
 
     function _payQueueHead(uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid, uint256 credited) {
+        return _payQueueHead(maxAmount, maxSteps, false);
+    }
+
+    function _payQueueHead(uint256 maxAmount, uint256 maxSteps, bool allowContractOverflow)
+        internal
+        returns (uint256 paid, uint256 credited)
+    {
         if (maxAmount == 0 || totalLiabilitiesBNB == 0) {
             return (0, 0);
         }
@@ -957,18 +970,28 @@ contract NavBNBv2 {
         }
         uint256 head = queueHead;
         uint256 steps;
-        while (remainingCap > 0 && remainingLiquid > 0 && head < queue.length && steps < maxSteps) {
+        while (
+            remainingCap > 0 && head < queue.length
+                && (steps < maxSteps || (allowContractOverflow && queue[head].user.code.length > 0))
+        ) {
             QueueEntry storage entry = queue[head];
+            bool isContract = entry.user.code.length > 0;
+            if (remainingLiquid == 0 && !(allowContractOverflow && isContract)) {
+                break;
+            }
             uint256 pay = entry.amount;
             if (pay > remainingCap) {
                 pay = remainingCap;
             }
-            if (pay > remainingLiquid) {
+            if ((!isContract || !allowContractOverflow) && pay > remainingLiquid) {
                 pay = remainingLiquid;
+            }
+            if (pay == 0) {
+                break;
             }
             entry.amount -= pay;
             totalLiabilitiesBNB -= pay;
-            if (entry.user.code.length > 0) {
+            if (isContract) {
                 _creditClaimable(entry.user, pay);
                 _reduceQueuedBNB(entry.user, pay);
                 credited += pay;
@@ -994,6 +1017,7 @@ contract NavBNBv2 {
                 _creditClaimable(entry.user, creditedAmount);
                 _reduceQueuedBNB(entry.user, creditedAmount);
                 credited += creditedAmount;
+                remainingCap -= creditedAmount;
                 if (creditedAmount >= remainingLiquid) {
                     remainingLiquid = 0;
                 } else {
@@ -1100,9 +1124,6 @@ contract NavBNBv2 {
         if (claimable == 0) {
             revert NoProgress();
         }
-        if (totalAssets() < _totalObligations()) {
-            revert Insolvent();
-        }
         _ensureLiquidityBestEffort(claimable);
         uint256 payout = claimable;
         uint256 liquidAvailable = redeemableBalance();
@@ -1120,7 +1141,10 @@ contract NavBNBv2 {
         totalClaimableBNB -= payout;
         (bool success,) = msg.sender.call{value: payout}("");
         if (!success) {
-            revert BnbSendFail();
+            claimableBNB[msg.sender] += payout;
+            totalClaimableBNB += payout;
+            emit ClaimableCredited(msg.sender, payout);
+            return;
         }
         trackedAssetsBNB = totalAssets();
         emit ClaimableWithdrawn(msg.sender, payout);
