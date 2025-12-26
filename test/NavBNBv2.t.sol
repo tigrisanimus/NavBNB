@@ -1637,8 +1637,9 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         nav.deposit{value: 10 ether}(0);
 
+        uint256 aliceBalance = nav.balanceOf(alice);
         vm.prank(alice);
-        nav.redeem(nav.balanceOf(alice) / 2, 0);
+        nav.redeem(aliceBalance / 2, 0);
 
         uint256 queued = nav.queuedBNB(alice);
         assertGt(queued, 0);
