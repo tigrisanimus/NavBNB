@@ -429,8 +429,12 @@ contract NavBNBv2 {
         if (totalLiabilitiesBNB > 0) {
             bnbQueued = bnbAfterFee;
         } else {
+            uint256 balanceBefore = address(this).balance;
             _ensureLiquidityBestEffort(bnbAfterFee);
             uint256 liquidAvailable = _queueRedeemableBalance();
+            if (totalClaimableBNB == 0) {
+                liquidAvailable = balanceBefore;
+            }
             if (liquidAvailable >= bnbAfterFee) {
                 bnbPaid = bnbAfterFee;
             } else {
@@ -501,7 +505,7 @@ contract NavBNBv2 {
                 revert PayoutTooSmall(expectedPaid, minPayoutWei);
             }
         }
-        (uint256 totalPaid, uint256 totalCredited) = _payQueueHead(totalLiabilitiesBNB, maxSteps, true);
+        (uint256 totalPaid, uint256 totalCredited) = _payQueueHead(totalLiabilitiesBNB, maxSteps, acceptDust);
         uint256 totalProgress = totalPaid + totalCredited;
         if (totalProgress == 0) {
             revert NoLiquidity();
