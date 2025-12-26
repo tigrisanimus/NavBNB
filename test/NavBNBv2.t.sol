@@ -10,6 +10,7 @@ import "test/mocks/MockTokenHoldingStrategy.sol";
 import "test/mocks/MockOpaqueStrategy.sol";
 import "test/mocks/MockZeroTokenStrategy.sol";
 import "test/mocks/MockERC20.sol";
+import {MockAnkrPool} from "test/mocks/MockAnkrPool.sol";
 
 contract ToggleReceiver {
     NavBNBv2 internal nav;
@@ -116,6 +117,7 @@ contract NavBNBv2Test is NoLogBound {
     NavBNBv2 internal nav;
     MockERC20 internal ankr;
     MockERC20 internal wbnb;
+    MockAnkrPool internal pool;
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
     address internal alice = address(0xA11CE);
@@ -125,6 +127,7 @@ contract NavBNBv2Test is NoLogBound {
         nav = new NavBNBv2(guardian, recovery);
         ankr = new MockERC20("ankrBNB", "ankrBNB");
         wbnb = new MockERC20("WBNB", "WBNB");
+        pool = new MockAnkrPool(address(ankr), 1e18);
         vm.prank(guardian);
         nav.setExitFeeConfig(0, 1 days, 0);
         vm.prank(guardian);
@@ -138,7 +141,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function _newMockStrategy() internal returns (MockBNBYieldStrategy) {
-        return new MockBNBYieldStrategy(address(ankr), address(wbnb));
+        return new MockBNBYieldStrategy(address(ankr), address(wbnb), address(pool));
     }
 
     function _activateStrategy(address newStrategy) internal {
@@ -181,16 +184,33 @@ contract NavBNBv2Test is NoLogBound {
         return fee;
     }
 
+    function _emergencyShareFee(uint256 shares) internal view returns (uint256) {
+        if (shares == 0) {
+            return 0;
+        }
+        uint256 quotient = shares / nav.BPS();
+        uint256 remainder = shares % nav.BPS();
+        uint256 fee = quotient * nav.EMERGENCY_FEE_BPS();
+        if (remainder != 0) {
+            uint256 remainderFee = remainder * nav.EMERGENCY_FEE_BPS();
+            fee += (remainderFee + nav.BPS() - 1) / nav.BPS();
+        }
+        if (fee >= shares) {
+            fee = shares - 1;
+        }
+        return fee;
+    }
+
     function _setTotalClaimable(uint256 amount) internal {
         stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(amount);
     }
 
     function _setQueueLength(uint256 length) internal {
-        vm.store(address(nav), bytes32(uint256(18)), bytes32(length));
+        vm.store(address(nav), bytes32(uint256(22)), bytes32(length));
     }
 
     function _setQueueLengthFor(address target, uint256 length) internal {
-        vm.store(target, bytes32(uint256(18)), bytes32(length));
+        vm.store(target, bytes32(uint256(22)), bytes32(length));
     }
 
     function _setQueueHead(uint256 head) internal {
@@ -202,7 +222,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function _setQueueEntry(uint256 index, address user, uint256 amount) internal {
-        bytes32 base = keccak256(abi.encode(uint256(18)));
+        bytes32 base = keccak256(abi.encode(uint256(22)));
         uint256 offset = index * 2;
         vm.store(address(nav), bytes32(uint256(base) + offset), bytes32(uint256(uint160(user))));
         vm.store(address(nav), bytes32(uint256(base) + offset + 1), bytes32(amount));
@@ -357,6 +377,14 @@ contract NavBNBv2Test is NoLogBound {
         sender.send{value: 1 ether}(payable(address(nav)));
     }
 
+    function testEffectiveMinQueueEntryScalesWithQueueLength() public {
+        _setMinQueueEntry(1);
+        _seedQueue(alice, 64, 1);
+
+        uint256 effective = nav.effectiveMinQueueEntry();
+        assertGt(effective, nav.minQueueEntryWei());
+    }
+
     function testForcedBnbSendDoesNotMint() public {
         vm.prank(alice);
         nav.deposit{value: 2 ether}(0);
@@ -378,7 +406,8 @@ contract NavBNBv2Test is NoLogBound {
     function testReceiveAcceptsWbnbUnwrap() public {
         MockERC20 ankr = new MockERC20("ankrBNB", "ankrBNB");
         MockWBNB wbnb = new MockWBNB();
-        MockTokenHoldingStrategy strategyWithWbnb = new MockTokenHoldingStrategy(address(ankr), address(wbnb));
+        MockTokenHoldingStrategy strategyWithWbnb =
+            new MockTokenHoldingStrategy(address(ankr), address(wbnb), address(pool));
         _activateStrategy(address(strategyWithWbnb));
 
         wbnb.mint(address(nav), 1 ether);
@@ -441,8 +470,7 @@ contract NavBNBv2Test is NoLogBound {
         MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
 
-        mock.setAssets(1 ether);
-        mock.setForceZeroWithdraw(true);
+        vm.deal(address(mock), 1 ether);
         vm.prank(guardian);
         nav.proposeStrategy(address(0));
         vm.warp(nav.strategyActivationTime());
@@ -453,7 +481,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testSetStrategyRevertsWhenNewStrategyNotEmpty() public {
         MockBNBYieldStrategy mock = _newMockStrategy();
-        mock.setAssets(1 ether);
+        vm.deal(address(mock), 1 ether);
 
         vm.prank(guardian);
         nav.proposeStrategy(address(mock));
@@ -466,7 +494,8 @@ contract NavBNBv2Test is NoLogBound {
     function testStrategySwitchFailsWhenOldStrategyHoldsTokens() public {
         MockERC20 ankr = new MockERC20("ankrBNB", "ankrBNB");
         MockERC20 wbnb = new MockERC20("WBNB", "WBNB");
-        MockTokenHoldingStrategy strategyWithTokens = new MockTokenHoldingStrategy(address(ankr), address(wbnb));
+        MockTokenHoldingStrategy strategyWithTokens =
+            new MockTokenHoldingStrategy(address(ankr), address(wbnb), address(pool));
 
         _activateStrategy(address(strategyWithTokens));
 
@@ -511,6 +540,19 @@ contract NavBNBv2Test is NoLogBound {
             )
         );
         nav.activateStrategy();
+    }
+
+    function testNavIgnoresStrategyTotalAssets() public {
+        MockBNBYieldStrategy mock = _newMockStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(10_000);
+
+        vm.prank(alice);
+        nav.deposit{value: 1 ether}(0);
+
+        mock.setAssets(100 ether);
+        assertEq(nav.totalAssets(), 1 ether);
     }
 
     function testActivateStrategyRevertsWhenPendingBalanceNonZero() public {
@@ -622,8 +664,7 @@ contract NavBNBv2Test is NoLogBound {
 
         _activateStrategy(address(current));
 
-        current.setAssets(1 ether);
-        current.setForceZeroWithdraw(true);
+        vm.deal(address(current), 1 ether);
 
         vm.prank(guardian);
         nav.proposeStrategy(address(next));
@@ -636,7 +677,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testActivateStrategyRevertsWhenNewNotEmpty() public {
         MockBNBYieldStrategy next = _newMockStrategy();
-        next.setAssets(1 ether);
+        vm.deal(address(next), 1 ether);
 
         vm.prank(guardian);
         nav.proposeStrategy(address(next));
@@ -815,7 +856,6 @@ contract NavBNBv2Test is NoLogBound {
         assertGt(liabilities, 0);
 
         vm.deal(address(nav), liabilities);
-        mock.setAssets(0);
         vm.deal(address(mock), 0);
 
         uint256 navAfter = nav.nav();
@@ -1461,6 +1501,110 @@ contract NavBNBv2Test is NoLogBound {
         nav.emergencyRedeem(1, 0);
     }
 
+    function testEmergencyRedeemInKindOnlyVaultBalances() public {
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        uint256 tokenAmount = nav.balanceOf(alice) / 2;
+        uint256 feeShares = _emergencyShareFee(tokenAmount);
+        uint256 netShares = tokenAmount - feeShares;
+        uint256 expectedBnb = (address(nav).balance * netShares) / nav.totalSupply();
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeemInKind(tokenAmount);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, expectedBnb);
+    }
+
+    function testEmergencyRedeemInKindOnlyStrategyBalances() public {
+        MockBNBYieldStrategy mock = _newMockStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        ankr.mint(address(mock), 4 ether);
+        wbnb.mint(address(mock), 3 ether);
+
+        uint256 tokenAmount = nav.balanceOf(alice);
+        uint256 feeShares = _emergencyShareFee(tokenAmount);
+        uint256 netShares = tokenAmount - feeShares;
+        uint256 supply = nav.totalSupply();
+        uint256 expectedBnb = (address(mock).balance * netShares) / supply;
+        uint256 expectedAnkr = (ankr.balanceOf(address(mock)) * netShares) / supply;
+        uint256 expectedWbnb = (wbnb.balanceOf(address(mock)) * netShares) / supply;
+
+        uint256 bnbBefore = alice.balance;
+        uint256 ankrBefore = ankr.balanceOf(alice);
+        uint256 wbnbBefore = wbnb.balanceOf(alice);
+        vm.prank(alice);
+        nav.emergencyRedeemInKind(tokenAmount);
+
+        assertEq(alice.balance - bnbBefore, expectedBnb);
+        assertEq(ankr.balanceOf(alice) - ankrBefore, expectedAnkr);
+        assertEq(wbnb.balanceOf(alice) - wbnbBefore, expectedWbnb);
+    }
+
+    function testEmergencyRedeemInKindMixedBalances() public {
+        MockBNBYieldStrategy mock = _newMockStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(5_000);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        ankr.mint(address(mock), 2 ether);
+        wbnb.mint(address(mock), 1 ether);
+        vm.deal(address(nav), address(nav).balance + 1 ether);
+
+        uint256 tokenAmount = nav.balanceOf(alice) / 2;
+        uint256 feeShares = _emergencyShareFee(tokenAmount);
+        uint256 netShares = tokenAmount - feeShares;
+        uint256 supply = nav.totalSupply();
+        uint256 expectedVaultBnb = (address(nav).balance * netShares) / supply;
+        uint256 expectedStrategyBnb = (address(mock).balance * netShares) / supply;
+        uint256 expectedAnkr = (ankr.balanceOf(address(mock)) * netShares) / supply;
+        uint256 expectedWbnb = (wbnb.balanceOf(address(mock)) * netShares) / supply;
+
+        uint256 bnbBefore = alice.balance;
+        uint256 ankrBefore = ankr.balanceOf(alice);
+        uint256 wbnbBefore = wbnb.balanceOf(alice);
+        vm.prank(alice);
+        nav.emergencyRedeemInKind(tokenAmount);
+
+        assertEq(alice.balance - bnbBefore, expectedVaultBnb + expectedStrategyBnb);
+        assertEq(ankr.balanceOf(alice) - ankrBefore, expectedAnkr);
+        assertEq(wbnb.balanceOf(alice) - wbnbBefore, expectedWbnb);
+    }
+
+    function testEmergencyRedeemInKindSmallAmountPaysOut() public {
+        vm.prank(alice);
+        nav.deposit{value: 1}(0);
+
+        uint256 shares = nav.balanceOf(alice);
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeemInKind(shares);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, 1);
+    }
+
+    function testEmergencyRedeemInKindRejectsZeroPayout() public {
+        stdstore.target(address(nav)).sig("totalSupply()").checked_write(1e18);
+        stdstore.target(address(nav)).sig("balanceOf(address)").with_key(alice).checked_write(1e18);
+        vm.deal(address(nav), 1);
+
+        vm.prank(alice);
+        vm.expectRevert(NavBNBv2.NoProgress.selector);
+        nav.emergencyRedeemInKind(1e18);
+    }
+
     function testWithdrawClaimablePaysPartialWhenStrategyPartial() public {
         MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
@@ -1481,6 +1625,73 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(balanceAfter - balanceBefore, 1 ether);
         assertEq(nav.claimableBNB(alice), 1 ether);
         assertEq(nav.totalClaimableBNB(), 1 ether);
+    }
+
+    function testQueuedBNBTracksEntriesAndClaim() public {
+        MockBNBYieldStrategy mock = _newMockStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+        mock.setMaxWithdraw(100 ether);
+
+        vm.prank(alice);
+        nav.deposit{value: 10 ether}(0);
+
+        vm.prank(alice);
+        nav.redeem(nav.balanceOf(alice) / 2, 0);
+
+        uint256 queued = nav.queuedBNB(alice);
+        assertGt(queued, 0);
+
+        vm.deal(address(nav), queued);
+        vm.prank(alice);
+        nav.claim(1, true);
+
+        assertEq(nav.queuedBNB(alice), 0);
+    }
+
+    function testQueuedBNBZeroedWhenCreditClaimable() public {
+        MockBNBYieldStrategy mock = _newMockStrategy();
+        _activateStrategy(address(mock));
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+        mock.setMaxWithdraw(100 ether);
+
+        ToggleReceiver bad = new ToggleReceiver(nav);
+        bad.setRevert(true);
+        vm.deal(address(bad), 10 ether);
+        bad.deposit{value: 5 ether}(0);
+        _seedQueue(bob, 1, 2 ether);
+        mock.setMaxWithdraw(1 ether);
+        vm.deal(address(nav), 0);
+        bad.redeem(nav.balanceOf(address(bad)), 0);
+
+        uint256 queuedBefore = nav.queuedBNB(address(bad));
+        assertGt(queuedBefore, 0);
+
+        vm.deal(address(nav), queuedBefore);
+        bad.setRevert(false);
+        vm.prank(alice);
+        nav.claim(1, true);
+
+        assertEq(nav.queuedBNB(address(bad)), 0);
+    }
+
+    function testPreviewWithdrawClaimableMatchesWithdraw() public {
+        stdstore.target(address(nav)).sig("claimableBNB(address)").with_key(alice).checked_write(1 ether);
+        stdstore.target(address(nav)).sig("totalClaimableBNB()").checked_write(1 ether);
+        vm.deal(address(nav), 0.4 ether);
+
+        (uint256 previewPayout, uint256 previewClaimable) = nav.previewWithdrawClaimable(alice);
+        assertEq(previewClaimable, 1 ether);
+        assertEq(previewPayout, 0.4 ether);
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.withdrawClaimable(0, true);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, previewPayout);
     }
 
     function testQueueHeadRevertEscrowsAndMovesOn() public {
@@ -1755,6 +1966,18 @@ contract NavBNBv2Test is NoLogBound {
         uint256 balanceAfter = alice.balance;
 
         assertEq(balanceAfter - balanceBefore, 0.5 ether);
+    }
+
+    function testClaimRejectsZeroPayoutEntry() public {
+        _setQueueLength(1);
+        _setQueueEntry(0, alice, 0);
+        _setQueueHead(0);
+        stdstore.target(address(nav)).sig("totalLiabilitiesBNB()").checked_write(1 ether);
+        vm.deal(address(nav), 1 ether);
+
+        vm.prank(alice);
+        vm.expectRevert(NavBNBv2.NoLiquidity.selector);
+        nav.claim(1);
     }
 
     function testEmergencyRedeemIgnoresQueueState() public {
@@ -2142,5 +2365,37 @@ contract NavBNBv2InvariantTest is StdInvariant, Test {
             claimableSum += nav.claimableBNB(participant);
         }
         assertEq(nav.totalClaimableBNB(), claimableSum);
+    }
+
+    function invariantNoDeadEnds() public {
+        uint256 participants = handler.participantCount();
+        for (uint256 i = 0; i < participants; i++) {
+            address participant = handler.participants(i);
+            uint256 shares = nav.balanceOf(participant);
+            uint256 claimable = nav.claimableBNB(participant);
+            uint256 queued = nav.queuedBNB(participant);
+            if (shares == 0 && claimable == 0 && queued == 0) {
+                continue;
+            }
+            if (nav.totalAssets() < nav.totalObligations()) {
+                continue;
+            }
+            bool ok = false;
+            if (claimable > 0) {
+                ok = _canCall(participant, abi.encodeWithSignature("withdrawClaimable(uint256,bool)", 0, true));
+            }
+            if (!ok && shares > 0) {
+                ok = _canCall(participant, abi.encodeWithSignature("emergencyRedeem(uint256,uint256)", shares, 0));
+            }
+            if (!ok && queued > 0) {
+                ok = _canCall(participant, abi.encodeWithSignature("claim(uint256,bool)", 32, true));
+            }
+            assertTrue(ok, "dead-end: user owed value but no path works");
+        }
+    }
+
+    function _canCall(address user, bytes memory data) internal returns (bool ok) {
+        vm.prank(user);
+        (ok,) = address(nav).call(data);
     }
 }

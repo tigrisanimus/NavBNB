@@ -8,6 +8,7 @@ import {MockAnkrPool} from "test/mocks/MockAnkrPool.sol";
 import {MockERC20, MockWBNB} from "test/mocks/MockERC20.sol";
 import {MockERC20NoReturn} from "test/mocks/MockERC20NoReturn.sol";
 import {MockRouter} from "test/mocks/MockRouter.sol";
+import {MockPancakePair} from "test/mocks/MockPancakePair.sol";
 
 contract AnkrBNBYieldStrategyTest is Test {
     uint256 private constant ONE = 1e18;
@@ -17,6 +18,7 @@ contract AnkrBNBYieldStrategyTest is Test {
     MockERC20 internal ankrBNB;
     MockWBNB internal wbnb;
     MockRouter internal router;
+    MockPancakePair internal pair;
 
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
@@ -29,14 +31,39 @@ contract AnkrBNBYieldStrategyTest is Test {
         wbnb = new MockWBNB();
         pool = new MockAnkrPool(address(ankrBNB), ONE);
         router = new MockRouter(address(ankrBNB), address(wbnb));
+        pair = new MockPancakePair(address(ankrBNB), address(wbnb));
         strategy = new AnkrBNBYieldStrategy(
-            address(this), guardian, address(pool), address(ankrBNB), address(router), address(wbnb), recovery
+            address(this),
+            guardian,
+            address(pool),
+            address(ankrBNB),
+            address(router),
+            address(wbnb),
+            recovery,
+            address(pair)
         );
 
         wbnb.mint(address(router), 1_000 ether);
         vm.deal(address(wbnb), 1_000 ether);
         vm.deal(address(this), 1_000 ether);
         vm.deal(alice, 100 ether);
+        _primeTwap(1e18);
+    }
+
+    function _primeTwap(uint256 price) internal {
+        pair.setReserves(100 ether, uint112((100 ether * price) / ONE));
+        strategy.updateTwap();
+        vm.warp(block.timestamp + strategy.MIN_TWAP_ELAPSED());
+        pair.setReserves(100 ether, uint112((100 ether * price) / ONE));
+        strategy.updateTwap();
+    }
+
+    function _primeTwapFor(AnkrBNBYieldStrategy localStrategy, MockPancakePair localPair, uint256 price) internal {
+        localPair.setReserves(100 ether, uint112((100 ether * price) / ONE));
+        localStrategy.updateTwap();
+        vm.warp(block.timestamp + localStrategy.MIN_TWAP_ELAPSED());
+        localPair.setReserves(100 ether, uint112((100 ether * price) / ONE));
+        localStrategy.updateTwap();
     }
 
     function testDepositMintsAnkrBNBAndIncreasesTotalAssets() public {
@@ -210,6 +237,7 @@ contract AnkrBNBYieldStrategyTest is Test {
         MockWBNB localWbnb = new MockWBNB();
         MockAnkrPool localPool = new MockAnkrPool(address(noReturnToken), ONE);
         MockRouter localRouter = new MockRouter(address(noReturnToken), address(localWbnb));
+        MockPancakePair localPair = new MockPancakePair(address(noReturnToken), address(localWbnb));
         AnkrBNBYieldStrategy localStrategy = new AnkrBNBYieldStrategy(
             address(this),
             guardian,
@@ -217,8 +245,10 @@ contract AnkrBNBYieldStrategyTest is Test {
             address(noReturnToken),
             address(localRouter),
             address(localWbnb),
-            recovery
+            recovery,
+            address(localPair)
         );
+        _primeTwapFor(localStrategy, localPair, 1e18);
 
         localWbnb.mint(address(localRouter), 10 ether);
         vm.deal(address(localWbnb), 10 ether);
@@ -275,9 +305,26 @@ contract AnkrBNBYieldStrategyTest is Test {
         assertEq(received, 9 ether);
     }
 
+    function testWithdrawRevertsOnTwapDeviation() public {
+        strategy.deposit{value: 1 ether}();
+        vm.prank(guardian);
+        strategy.setMaxDeviationBps(100);
+        router.setRate(5e17);
+
+        vm.expectRevert(abi.encodeWithSelector(AnkrBNBYieldStrategy.TwapDeviation.selector, 5e17, 1e18));
+        strategy.withdraw(1 ether);
+    }
+
     function testMulDivUpHandlesLargeValues() public {
         AnkrBNBYieldStrategyHarness harness = new AnkrBNBYieldStrategyHarness(
-            address(this), guardian, address(pool), address(ankrBNB), address(router), address(wbnb), recovery
+            address(this),
+            guardian,
+            address(pool),
+            address(ankrBNB),
+            address(router),
+            address(wbnb),
+            recovery,
+            address(pair)
         );
         uint256 a = type(uint128).max;
         uint256 b = 1e18;
@@ -357,8 +404,9 @@ contract AnkrBNBYieldStrategyHarness is AnkrBNBYieldStrategy {
         address ankrBNB_,
         address router_,
         address wbnb_,
-        address recovery_
-    ) AnkrBNBYieldStrategy(vault_, guardian_, bnbStakingPool_, ankrBNB_, router_, wbnb_, recovery_) {}
+        address recovery_,
+        address twapPair_
+    ) AnkrBNBYieldStrategy(vault_, guardian_, bnbStakingPool_, ankrBNB_, router_, wbnb_, recovery_, twapPair_) {}
 
     function exposedMulDivUp(uint256 a, uint256 b, uint256 denominator) external pure returns (uint256) {
         return _mulDivUp(a, b, denominator);
@@ -372,12 +420,39 @@ contract NavBNBv2StrategyWiringTest is Test {
         MockAnkrPool pool,
         MockERC20 ankrBNB,
         MockRouter router,
-        MockWBNB wbnb
+        MockWBNB wbnb,
+        MockPancakePair pair
     ) internal returns (AnkrBNBYieldStrategy) {
         vm.prank(vault);
         return new AnkrBNBYieldStrategy(
-            vault, guardian, address(pool), address(ankrBNB), address(router), address(wbnb), address(0xCAFE)
+            vault,
+            guardian,
+            address(pool),
+            address(ankrBNB),
+            address(router),
+            address(wbnb),
+            address(0xCAFE),
+            address(pair)
         );
+    }
+
+    function _primeTwap(AnkrBNBYieldStrategy strategy, MockPancakePair pair, uint256 price) internal {
+        pair.setReserves(100 ether, uint112((100 ether * price) / 1e18));
+        strategy.updateTwap();
+        vm.warp(block.timestamp + strategy.MIN_TWAP_ELAPSED());
+        pair.setReserves(100 ether, uint112((100 ether * price) / 1e18));
+        strategy.updateTwap();
+    }
+
+    function _deployFreshStrategy(NavBNBv2 nav, address guardian) internal returns (AnkrBNBYieldStrategy strategy) {
+        MockERC20 ankrBNBNext = new MockERC20("ankrBNB", "ankrBNB");
+        MockWBNB wbnbNext = new MockWBNB();
+        MockAnkrPool poolNext = new MockAnkrPool(address(ankrBNBNext), 1e18);
+        MockRouter routerNext = new MockRouter(address(ankrBNBNext), address(wbnbNext));
+        MockPancakePair pairNext = new MockPancakePair(address(ankrBNBNext), address(wbnbNext));
+        strategy =
+            _deployStrategyForVault(address(nav), guardian, poolNext, ankrBNBNext, routerNext, wbnbNext, pairNext);
+        _primeTwap(strategy, pairNext, 1e18);
     }
 
     function testNavBNBv2CanSetAnkrStrategyWhenEmpty() public {
@@ -389,7 +464,10 @@ contract NavBNBv2StrategyWiringTest is Test {
         MockWBNB wbnb = new MockWBNB();
         MockAnkrPool pool = new MockAnkrPool(address(ankrBNB), 1e18);
         MockRouter router = new MockRouter(address(ankrBNB), address(wbnb));
-        AnkrBNBYieldStrategy strategy = _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb);
+        MockPancakePair pair = new MockPancakePair(address(ankrBNB), address(wbnb));
+        AnkrBNBYieldStrategy strategy =
+            _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb, pair);
+        _primeTwap(strategy, pair, 1e18);
 
         vm.prank(guardian);
         nav.proposeStrategy(address(strategy));
@@ -408,7 +486,10 @@ contract NavBNBv2StrategyWiringTest is Test {
         MockWBNB wbnb = new MockWBNB();
         MockAnkrPool pool = new MockAnkrPool(address(ankrBNB), 1e18);
         MockRouter router = new MockRouter(address(ankrBNB), address(wbnb));
-        AnkrBNBYieldStrategy strategy = _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb);
+        MockPancakePair pair = new MockPancakePair(address(ankrBNB), address(wbnb));
+        AnkrBNBYieldStrategy strategy =
+            _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb, pair);
+        _primeTwap(strategy, pair, 1e18);
 
         vm.prank(guardian);
         nav.proposeStrategy(address(strategy));
@@ -427,12 +508,7 @@ contract NavBNBv2StrategyWiringTest is Test {
         strategy.withdrawAllToVault();
         assertEq(strategy.totalAssets(), 0);
 
-        MockERC20 ankrBNBNext = new MockERC20("ankrBNB", "ankrBNB");
-        MockWBNB wbnbNext = new MockWBNB();
-        MockAnkrPool poolNext = new MockAnkrPool(address(ankrBNBNext), 1e18);
-        MockRouter routerNext = new MockRouter(address(ankrBNBNext), address(wbnbNext));
-        AnkrBNBYieldStrategy nextStrategy =
-            _deployStrategyForVault(address(nav), guardian, poolNext, ankrBNBNext, routerNext, wbnbNext);
+        AnkrBNBYieldStrategy nextStrategy = _deployFreshStrategy(nav, guardian);
 
         vm.prank(guardian);
         nav.proposeStrategy(address(nextStrategy));
@@ -440,5 +516,52 @@ contract NavBNBv2StrategyWiringTest is Test {
         vm.prank(guardian);
         nav.activateStrategy();
         assertEq(address(nav.strategy()), address(nextStrategy));
+    }
+
+    function testEmergencyRedeemInKindBypassesTwapDeviation() public {
+        address guardian = address(0xBEEF);
+        address recovery = address(0xCAFE);
+        NavBNBv2 nav = new NavBNBv2(guardian, recovery);
+
+        MockERC20 ankrBNB = new MockERC20("ankrBNB", "ankrBNB");
+        MockWBNB wbnb = new MockWBNB();
+        MockAnkrPool pool = new MockAnkrPool(address(ankrBNB), 1e18);
+        MockRouter router = new MockRouter(address(ankrBNB), address(wbnb));
+        MockPancakePair pair = new MockPancakePair(address(ankrBNB), address(wbnb));
+        AnkrBNBYieldStrategy strategy =
+            _deployStrategyForVault(address(nav), guardian, pool, ankrBNB, router, wbnb, pair);
+        _primeTwap(strategy, pair, 1e18);
+
+        vm.prank(guardian);
+        nav.proposeStrategy(address(strategy));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        nav.activateStrategy();
+        vm.prank(guardian);
+        nav.setLiquidityBufferBPS(0);
+
+        wbnb.mint(address(router), 20 ether);
+        vm.deal(address(wbnb), 20 ether);
+        vm.deal(address(this), 10 ether);
+        nav.deposit{value: 10 ether}(0);
+
+        vm.prank(guardian);
+        strategy.setMaxDeviationBps(100);
+        router.setRate(5e17);
+
+        uint256 shares = nav.balanceOf(address(this)) / 2;
+        (uint256 bnbOut,,,) = nav.previewRedeem(shares);
+        uint256 expectedSpotOut = (bnbOut * 5e17) / 1e18;
+        uint256 expectedTwapOut = bnbOut;
+        vm.expectRevert(
+            abi.encodeWithSelector(AnkrBNBYieldStrategy.TwapDeviation.selector, expectedSpotOut, expectedTwapOut)
+        );
+        nav.redeem(shares, 0);
+
+        uint256 ankrBefore = ankrBNB.balanceOf(address(this));
+        nav.emergencyRedeemInKind(nav.balanceOf(address(this)));
+        uint256 ankrAfter = ankrBNB.balanceOf(address(this));
+
+        assertGt(ankrAfter - ankrBefore, 0);
     }
 }

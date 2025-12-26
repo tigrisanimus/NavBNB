@@ -13,9 +13,10 @@ contract DeployStrategy is Script {
         address router = vm.envAddress("DEX_ROUTER");
         address wbnb = vm.envAddress("WBNB");
         address recovery = vm.envAddress("RECOVERY");
+        address twapPair = vm.envAddress("ANKR_WBNB_PAIR");
 
         vm.startBroadcast();
-        strategy = new AnkrBNBYieldStrategy(vault, guardian, stakingPool, ankrBNB, router, wbnb, recovery);
+        strategy = new AnkrBNBYieldStrategy(vault, guardian, stakingPool, ankrBNB, router, wbnb, recovery, twapPair);
         vm.stopBroadcast();
     }
 }
