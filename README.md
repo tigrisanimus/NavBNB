@@ -8,11 +8,16 @@ NavBNB v2 is a BNB-denominated NAV token on BSC. The vault tracks net assets (to
 - **Roles**:
   - **guardian**: can pause/unpause, configure exit fees, set the liquidity buffer, and manage strategy proposals/activation.
   - **recovery**: can sweep untracked surplus BNB via `recoverSurplus`.
-- **Strategy (optional)**: `IBNBYieldStrategy` implementations (e.g., `AnkrBNBYieldStrategy`) can hold assets for yield. The vault counts strategy assets in `totalAssets()` and maintains a configurable on-vault liquidity buffer.
+- **Strategy (optional)**: `IBNBYieldStrategy` implementations (e.g., `AnkrBNBYieldStrategy`) can hold assets for yield. The vault **does not trust** `strategy.totalAssets()` for NAV; it only uses observable on-chain balances and conservative valuation.
 
 ## NAV, Assets, and Obligations
 
-- **Total assets**: `totalAssets()` = vault BNB balance + `strategy.totalAssets()` (if set).
+- **Total assets**: `totalAssets()` is computed from **observable balances**, not strategy-reported totals:
+  - Vault BNB balance: `address(this).balance`.
+  - Strategy BNB balance: `address(strategy).balance`.
+  - Strategy WBNB balance valued 1:1 with BNB.
+  - Strategy ankrBNB balance valued conservatively as:
+    - `min(stakingPool.exchangeRatio(), TWAP)` then apply `valuationHaircutBps`.
 - **Total obligations**: `totalLiabilitiesBNB` (queued redemptions) + `totalClaimableBNB` (claimable credits from failed sends).
 - **Net assets (NAV basis)**: `totalAssets - totalObligations`.
 - **NAV**:
@@ -54,8 +59,8 @@ interface IBNBYieldStrategy {
 }
 ```
 
-- `totalAssets()` is treated as BNB-equivalent value and is included in vault NAV.
-- **Strategy switching safety**: the current strategy must report `totalAssets() == 0` before it can be replaced. A new strategy must be a contract and must also report `totalAssets() == 0` on activation.
+- `totalAssets()` is **not** trusted for NAV; the vault relies on observable balances and conservative pricing.
+- **Strategy switching safety**: the current strategy must be empty (no BNB/WBNB/ankrBNB balances) before it can be replaced. A new strategy must be a contract and must also be empty on activation.
 - **Timelock**: strategy changes use `proposeStrategy()` + `activateStrategy()` with `strategyTimelockSeconds` (default `1 days`, max `7 days`). Direct `setStrategy()` is only allowed when the timelock is explicitly disabled (`strategyTimelockSeconds == 0`).
 
 ### AnkrBNB Strategy (optional)
@@ -63,6 +68,7 @@ interface IBNBYieldStrategy {
 `AnkrBNBYieldStrategy` is an example strategy that stakes BNB into the Ankr staking pool and swaps ankrBNB back to BNB via a router on withdrawals. It includes:
 
 - Guardian-controlled slippage and valuation haircut limits (`maxSlippageBps`, `valuationHaircutBps`).
+- TWAP-guarded swaps: router spot quotes must not deviate beyond `maxDeviationBps` versus the ankrBNB/WBNB TWAP.
 - A pause mechanism for deposits/withdrawals.
 - A restricted token recovery path (only while paused) to the vault or a designated recovery address.
 
@@ -86,6 +92,14 @@ This strategy is included for integration/testing and should be treated as an ex
 - Pays from current reserves only: `bnbOut <= reserveBNB()` where `reserveBNB = totalAssets - totalObligations`.
 - Charges `EMERGENCY_FEE_BPS` (rounded up on remainder) and reverts if payout is zero.
 
+### Emergency Redeem (in-kind escape hatch)
+
+`emergencyRedeemInKind(tokenAmount)` is an unconditional escape hatch:
+
+- Burns shares and pays out a **pro-rata** slice of vault-held BNB plus strategy-held BNB/WBNB/ankrBNB.
+- Applies the emergency fee as a share haircut (remaining assets stay in the vault/strategy).
+- Ignores queue/cap mechanics and **reverts only if the payout would be zero**.
+
 ## Daily Throttling / Pacing (Current Behavior)
 
 `NavBNBv2` includes cap tracking helpers (`capForDay`, `capRemainingToday`) and storage (`spentToday`, `capBaseBNB`), but **redemption and claim flows do not currently enforce a daily cap**. These fields are unused in redemption processing and should be treated as **not yet implemented** throttling.
@@ -101,7 +115,7 @@ This strategy is included for integration/testing and should be treated as an ex
 
 ## Threat Model / Known Limitations
 
-- **External strategy risk**: strategy contracts and integrations (DEX/router, staking pool) are external dependencies and can fail or be compromised.
+- **External strategy risk**: strategy contracts and integrations (DEX/router, TWAP pair, staking pool) are external dependencies and can fail or be compromised.
 - **No guaranteed yield**: returns depend entirely on external strategy performance; losses reduce NAV.
 - **Queue delays**: redemptions can be queued when liquidity is insufficient; claims are processed in bounded steps.
 - **Daily throttling not enforced**: cap helpers are present but not wired into redemptions/claims.

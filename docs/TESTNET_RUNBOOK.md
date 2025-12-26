@@ -10,6 +10,7 @@ export PRIVATE_KEY="0x..." # deployer
 export GUARDIAN="0x..."
 export RECOVERY="0x..."
 export STRATEGY_OWNER="0x..." # if strategy has an owner/guardian
+export ANKR_WBNB_PAIR="0x..." # PancakeSwap V2-style ankrBNB/WBNB pair
 ```
 
 ## 2) Deploy the vault
@@ -99,6 +100,15 @@ cast send "$VAULT" \
 ```bash
 cast send "$VAULT" \
   "emergencyRedeem(uint256,uint256)" 100000000000000000 0 \
+  --rpc-url "$RPC_URL" \
+  --private-key "$PRIVATE_KEY"
+```
+
+### Emergency redeem (in-kind) escape hatch
+
+```bash
+cast send "$VAULT" \
+  "emergencyRedeemInKind(uint256)" 100000000000000000 \
   --rpc-url "$RPC_URL" \
   --private-key "$PRIVATE_KEY"
 ```

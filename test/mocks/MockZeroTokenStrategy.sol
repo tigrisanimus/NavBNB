@@ -25,4 +25,18 @@ contract MockZeroTokenStrategy is IBNBYieldStrategy {
     function wbnb() external pure returns (address) {
         return address(0);
     }
+
+    function stakingPool() external pure returns (address) {
+        return address(0);
+    }
+
+    function valuationHaircutBps() external pure returns (uint16) {
+        return 0;
+    }
+
+    function consultTwap(uint256) external pure returns (uint256) {
+        return 0;
+    }
+
+    function transferHoldingsTo(address, uint256, uint256, uint256) external pure {}
 }

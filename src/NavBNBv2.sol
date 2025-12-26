@@ -16,6 +16,20 @@ interface IAnkrStrategyTokens {
     function wbnb() external view returns (address);
 }
 
+interface IAnkrBNBStakingPool {
+    function exchangeRatio() external view returns (uint256);
+}
+
+interface IAnkrStrategyView is IAnkrStrategyTokens {
+    function stakingPool() external view returns (address);
+    function valuationHaircutBps() external view returns (uint16);
+    function consultTwap(uint256 amountIn) external view returns (uint256);
+}
+
+interface IAnkrStrategyTransfers {
+    function transferHoldingsTo(address to, uint256 ankrAmount, uint256 wbnbAmount, uint256 bnbAmount) external;
+}
+
 contract NavBNBv2 {
     string public constant name = "NavBNBv2";
     string public constant symbol = "nBNBv2";
@@ -43,10 +57,14 @@ contract NavBNBv2 {
     uint256 public totalClaimableBNB;
     uint256 public trackedAssetsBNB;
     mapping(address => uint256) public claimableBNB;
+    mapping(address => uint256) public queuedBNB;
     uint256 public minPayoutWei;
     uint256 public minQueueEntryWei;
 
     IBNBYieldStrategy public strategy;
+    address public ankrBNB;
+    address public wbnb;
+    address public stakingPool;
     uint256 public liquidityBufferBPS = 1_000;
     uint256 public minExitSeconds;
     uint256 public fullExitSeconds;
@@ -135,6 +153,7 @@ contract NavBNBv2 {
     error DirectBnbNotAccepted();
     error StrategyTokenQueryFailed(address strategy, bytes4 selector);
     error StrategyTokenAddressZero(address strategy, bytes4 selector);
+    error EmergencyRedeemZero();
 
     enum ClaimBlockReason {
         None,
@@ -176,15 +195,9 @@ contract NavBNBv2 {
         if (msg.sender == strategyAddress) {
             return;
         }
-        if (strategyAddress != address(0)) {
-            (bool success, bytes memory data) =
-                strategyAddress.staticcall(abi.encodeWithSelector(IAnkrStrategyTokens.wbnb.selector));
-            if (success && data.length == 32) {
-                address token = abi.decode(data, (address));
-                if (msg.sender == token) {
-                    return;
-                }
-            }
+        address localWbnb = wbnb;
+        if (localWbnb != address(0) && msg.sender == localWbnb) {
+            return;
         }
         revert DirectBnbNotAccepted();
     }
@@ -476,7 +489,7 @@ contract NavBNBv2 {
             uint256 redeemable = _queueRedeemableBalance();
             address strategyAddress = address(strategy);
             if (strategyAddress != address(0)) {
-                redeemable += strategy.totalAssets();
+                redeemable += _strategyAssetsBnbConservative();
             }
             uint256 expectedPaid = entry.amount > redeemable ? redeemable : entry.amount;
             if (expectedPaid == 0) {
@@ -507,6 +520,10 @@ contract NavBNBv2 {
         whenNotPaused
     {
         _emergencyRedeem(tokenAmount, minBnbOut, acceptDust);
+    }
+
+    function emergencyRedeemInKind(uint256 tokenAmount) external nonReentrant whenNotPaused {
+        _emergencyRedeemInKind(tokenAmount);
     }
 
     function _emergencyRedeem(uint256 tokenAmount, uint256 minBnbOut, bool acceptDust) internal {
@@ -549,6 +566,61 @@ contract NavBNBv2 {
         emit EmergencyRedeem(msg.sender, burnAmount, payableOut, fee);
     }
 
+    function _emergencyRedeemInKind(uint256 tokenAmount) internal {
+        if (tokenAmount == 0) {
+            revert ZeroRedeem();
+        }
+        uint256 supply = totalSupply;
+        if (supply == 0) {
+            revert NoProgress();
+        }
+        uint256 feeShares = _emergencyShareFee(tokenAmount);
+        uint256 netShares = tokenAmount - feeShares;
+        if (netShares == 0) {
+            revert EmergencyRedeemZero();
+        }
+
+        uint256 vaultBnb = address(this).balance;
+        address strategyAddress = address(strategy);
+        uint256 strategyBnb;
+        uint256 strategyWbnb;
+        uint256 strategyAnkr;
+        if (strategyAddress != address(0)) {
+            strategyBnb = strategyAddress.balance;
+            address localWbnb = wbnb;
+            if (localWbnb != address(0)) {
+                strategyWbnb = IERC20(localWbnb).balanceOf(strategyAddress);
+            }
+            address localAnkr = ankrBNB;
+            if (localAnkr != address(0)) {
+                strategyAnkr = IERC20(localAnkr).balanceOf(strategyAddress);
+            }
+        }
+
+        uint256 vaultBnbOut = (vaultBnb * netShares) / supply;
+        uint256 strategyBnbOut = (strategyBnb * netShares) / supply;
+        uint256 strategyWbnbOut = (strategyWbnb * netShares) / supply;
+        uint256 strategyAnkrOut = (strategyAnkr * netShares) / supply;
+        if (vaultBnbOut + strategyBnbOut + strategyWbnbOut + strategyAnkrOut == 0) {
+            revert NoProgress();
+        }
+
+        _burn(msg.sender, tokenAmount);
+
+        if (strategyAddress != address(0) && (strategyBnbOut > 0 || strategyWbnbOut > 0 || strategyAnkrOut > 0)) {
+            IAnkrStrategyTransfers(strategyAddress)
+                .transferHoldingsTo(msg.sender, strategyAnkrOut, strategyWbnbOut, strategyBnbOut);
+        }
+        if (vaultBnbOut > 0) {
+            (bool success,) = msg.sender.call{value: vaultBnbOut}("");
+            if (!success) {
+                revert BnbSendFail();
+            }
+        }
+        trackedAssetsBNB = totalAssets();
+        emit EmergencyRedeem(msg.sender, tokenAmount, vaultBnbOut + strategyBnbOut, feeShares);
+    }
+
     function _emergencyFee(uint256 bnbOwed) internal pure returns (uint256) {
         if (bnbOwed == 0) {
             return 0;
@@ -562,6 +634,23 @@ contract NavBNBv2 {
         }
         if (fee >= bnbOwed) {
             fee = bnbOwed - 1;
+        }
+        return fee;
+    }
+
+    function _emergencyShareFee(uint256 shares) internal pure returns (uint256) {
+        if (shares == 0) {
+            return 0;
+        }
+        uint256 quotient = shares / BPS;
+        uint256 remainder = shares % BPS;
+        uint256 fee = quotient * EMERGENCY_FEE_BPS;
+        if (remainder != 0) {
+            uint256 remainderFee = remainder * EMERGENCY_FEE_BPS;
+            fee += (remainderFee + BPS - 1) / BPS;
+        }
+        if (fee >= shares) {
+            fee = shares - 1;
         }
         return fee;
     }
@@ -632,6 +721,15 @@ contract NavBNBv2 {
         bnbOut = bnbOwed - fee;
     }
 
+    function previewWithdrawClaimable(address user) external view returns (uint256 payout, uint256 claimable) {
+        claimable = claimableBNB[user];
+        if (claimable == 0) {
+            return (0, 0);
+        }
+        uint256 redeemable = redeemableBalance() + _strategyAssetsBnbConservative();
+        payout = claimable > redeemable ? redeemable : claimable;
+    }
+
     function exitFeeBpsNow(address user) external view returns (uint256) {
         return exitFeeBps(user);
     }
@@ -678,8 +776,7 @@ contract NavBNBv2 {
     }
 
     function totalAssets() public view returns (uint256) {
-        uint256 strategyAssets = address(strategy) == address(0) ? 0 : strategy.totalAssets();
-        return address(this).balance + strategyAssets;
+        return address(this).balance + _strategyAssetsBnbConservative();
     }
 
     function exitFeeBps(address user) public view returns (uint256) {
@@ -824,7 +921,7 @@ contract NavBNBv2 {
         )
     {
         liquidBNB = address(this).balance;
-        strategyAssets = address(strategy) == address(0) ? 0 : strategy.totalAssets();
+        strategyAssets = _strategyAssetsBnbConservative();
         obligations = _totalObligations();
         bufferTarget = ((liquidBNB + strategyAssets) * liquidityBufferBPS) / BPS;
         bufferBps = liquidityBufferBPS;
@@ -841,6 +938,7 @@ contract NavBNBv2 {
         }
         queue.push(QueueEntry({user: user, amount: amount}));
         totalLiabilitiesBNB += amount;
+        queuedBNB[user] += amount;
     }
 
     function _payQueueHead(uint256 maxAmount, uint256 maxSteps) internal returns (uint256 paid, uint256 credited) {
@@ -872,6 +970,7 @@ contract NavBNBv2 {
             totalLiabilitiesBNB -= pay;
             if (entry.user.code.length > 0) {
                 _creditClaimable(entry.user, pay);
+                _reduceQueuedBNB(entry.user, pay);
                 credited += pay;
                 remainingCap -= pay;
                 if (pay >= remainingLiquid) {
@@ -893,6 +992,7 @@ contract NavBNBv2 {
                 entry.amount = 0;
                 totalLiabilitiesBNB -= creditedAmount - pay;
                 _creditClaimable(entry.user, creditedAmount);
+                _reduceQueuedBNB(entry.user, creditedAmount);
                 credited += creditedAmount;
                 if (creditedAmount >= remainingLiquid) {
                     remainingLiquid = 0;
@@ -906,6 +1006,7 @@ contract NavBNBv2 {
             paid += pay;
             remainingCap -= pay;
             remainingLiquid -= pay;
+            _reduceQueuedBNB(entry.user, pay);
             emit QueuePaid(entry.user, pay);
             if (entry.amount == 0) {
                 head++;
@@ -1075,7 +1176,7 @@ contract NavBNBv2 {
             return;
         }
         uint256 shortfall = needed - balance;
-        uint256 available = strategy.totalAssets();
+        uint256 available = _strategyAssetsBnbConservative();
         uint256 withdrawAmount = shortfall > available ? available : shortfall;
         if (withdrawAmount == 0) {
             revert InsufficientLiquidityAfterWithdraw();
@@ -1098,7 +1199,7 @@ contract NavBNBv2 {
             return;
         }
         uint256 shortfall = target - balance;
-        uint256 available = strategy.totalAssets();
+        uint256 available = _strategyAssetsBnbConservative();
         uint256 withdrawAmount = shortfall > available ? available : shortfall;
         if (withdrawAmount == 0) {
             return;
@@ -1156,14 +1257,12 @@ contract NavBNBv2 {
             _requireStrategyEmpty(newStrategy);
         }
         strategy = IBNBYieldStrategy(newStrategy);
+        _setStrategyTokens(newStrategy);
         trackedAssetsBNB = totalAssets();
         emit StrategyUpdated(oldStrategy, newStrategy);
     }
 
     function _requireStrategyEmpty(address strategyAddress) internal view {
-        if (IBNBYieldStrategy(strategyAddress).totalAssets() != 0) {
-            revert StrategyNotEmpty();
-        }
         if (strategyAddress.balance != 0) {
             revert StrategyNotEmpty();
         }
@@ -1185,6 +1284,69 @@ contract NavBNBv2 {
         }
     }
 
+    function _setStrategyTokens(address strategyAddress) internal {
+        if (strategyAddress == address(0)) {
+            ankrBNB = address(0);
+            wbnb = address(0);
+            stakingPool = address(0);
+            return;
+        }
+        ankrBNB = _readStrategyAddress(strategyAddress, IAnkrStrategyTokens.ankrBNB.selector);
+        wbnb = _readStrategyAddress(strategyAddress, IAnkrStrategyTokens.wbnb.selector);
+        stakingPool = _readStrategyAddress(strategyAddress, IAnkrStrategyView.stakingPool.selector);
+    }
+
+    function _readStrategyAddress(address strategyAddress, bytes4 selector) internal view returns (address token) {
+        (bool success, bytes memory data) = strategyAddress.staticcall(abi.encodeWithSelector(selector));
+        if (!success || data.length != 32) {
+            revert StrategyTokenQueryFailed(strategyAddress, selector);
+        }
+        token = abi.decode(data, (address));
+        if (token == address(0)) {
+            revert StrategyTokenAddressZero(strategyAddress, selector);
+        }
+    }
+
+    function _strategyAssetsBnbConservative() internal view returns (uint256) {
+        address strategyAddress = address(strategy);
+        if (strategyAddress == address(0)) {
+            return 0;
+        }
+        uint256 total;
+        total += strategyAddress.balance;
+        address localWbnb = wbnb;
+        if (localWbnb != address(0)) {
+            total += IERC20(localWbnb).balanceOf(strategyAddress);
+        }
+        address localAnkr = ankrBNB;
+        if (localAnkr != address(0)) {
+            uint256 ankrBalance = IERC20(localAnkr).balanceOf(strategyAddress);
+            if (ankrBalance > 0) {
+                total += _ankrValueBnbConservative(ankrBalance);
+            }
+        }
+        return total;
+    }
+
+    function _ankrValueBnbConservative(uint256 ankrAmount) internal view returns (uint256) {
+        if (ankrAmount == 0) {
+            return 0;
+        }
+        address pool = stakingPool;
+        if (pool == address(0)) {
+            return 0;
+        }
+        uint256 ratio = IAnkrBNBStakingPool(pool).exchangeRatio();
+        uint256 stakingValue = ratio == 0 ? 0 : (ankrAmount * ratio) / 1e18;
+        uint256 twapValue = IAnkrStrategyView(address(strategy)).consultTwap(ankrAmount);
+        uint256 conservative = twapValue == 0 ? stakingValue : (stakingValue < twapValue ? stakingValue : twapValue);
+        uint256 haircutBps = IAnkrStrategyView(address(strategy)).valuationHaircutBps();
+        if (haircutBps >= BPS) {
+            return 0;
+        }
+        return (conservative * (BPS - haircutBps)) / BPS;
+    }
+
     function _creditClaimable(address user, uint256 amount) internal {
         if (amount == 0) {
             return;
@@ -1192,6 +1354,18 @@ contract NavBNBv2 {
         claimableBNB[user] += amount;
         totalClaimableBNB += amount;
         emit ClaimableCredited(user, amount);
+    }
+
+    function _reduceQueuedBNB(address user, uint256 amount) internal {
+        if (amount == 0) {
+            return;
+        }
+        uint256 queued = queuedBNB[user];
+        if (amount >= queued) {
+            queuedBNB[user] = 0;
+        } else {
+            queuedBNB[user] = queued - amount;
+        }
     }
 
     function _activeQueueLength() internal view returns (uint256) {
