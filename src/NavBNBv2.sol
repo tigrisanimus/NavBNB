@@ -28,6 +28,7 @@ contract NavBNBv2 {
     uint256 public constant DEFAULT_MAX_STEPS = 32;
     uint256 public constant AUTO_COMPACT_HEAD_THRESHOLD = 32;
     uint256 public constant AUTO_COMPACT_MAX_MOVES = 64;
+    uint256 public constant QUEUE_ENTRY_SCALE = 32;
     uint256 public constant MAX_GAS_PER_PAY = 30_000;
     uint256 public constant MIN_PAYOUT_WEI_LOWER = 1;
     uint256 public constant MIN_PAYOUT_WEI_UPPER = 1e18;
@@ -96,6 +97,7 @@ contract NavBNBv2 {
     event MinPayoutWeiUpdated(uint256 minPayoutWei);
     event MinQueueEntryWeiUpdated(uint256 minQueueEntryWei);
     event ClaimableWithdrawn(address indexed account, uint256 amount);
+    event QueuePaid(address indexed user, uint256 amount);
 
     error ZeroDeposit();
     error ZeroRedeem();
@@ -132,6 +134,7 @@ contract NavBNBv2 {
     error MinQueueEntryOutOfRange();
     error DirectBnbNotAccepted();
     error StrategyTokenQueryFailed(address strategy, bytes4 selector);
+    error StrategyTokenAddressZero(address strategy, bytes4 selector);
 
     enum ClaimBlockReason {
         None,
@@ -258,6 +261,9 @@ contract NavBNBv2 {
         address newStrategy = pendingStrategy;
         if (newStrategy != address(0) && newStrategy.code.length == 0) {
             revert StrategyNotContract();
+        }
+        if (newStrategy != address(0)) {
+            _requireStrategyEmpty(newStrategy);
         }
         _setStrategy(newStrategy);
         _clearPendingStrategy();
@@ -544,17 +550,17 @@ contract NavBNBv2 {
     }
 
     function _emergencyFee(uint256 bnbOwed) internal pure returns (uint256) {
+        if (bnbOwed == 0) {
+            return 0;
+        }
         uint256 quotient = bnbOwed / BPS;
         uint256 remainder = bnbOwed % BPS;
         uint256 fee = quotient * EMERGENCY_FEE_BPS;
-        uint256 remainderFee = remainder * EMERGENCY_FEE_BPS;
-        if (remainderFee != 0) {
+        if (remainder != 0) {
+            uint256 remainderFee = remainder * EMERGENCY_FEE_BPS;
             fee += (remainderFee + BPS - 1) / BPS;
         }
-        if (fee > bnbOwed) {
-            fee = bnbOwed;
-        }
-        if (bnbOwed > 0 && fee >= bnbOwed) {
+        if (fee >= bnbOwed) {
             fee = bnbOwed - 1;
         }
         return fee;
@@ -719,6 +725,14 @@ contract NavBNBv2 {
         return balance > reserved ? balance - reserved : 0;
     }
 
+    function activeQueueLength() external view returns (uint256) {
+        return _activeQueueLength();
+    }
+
+    function effectiveMinQueueEntry() external view returns (uint256) {
+        return _effectiveMinQueueEntry();
+    }
+
     function queueState() external view returns (uint256 head, uint256 len, address headUser, uint256 headAmount) {
         head = queueHead;
         len = queue.length;
@@ -821,7 +835,8 @@ contract NavBNBv2 {
     }
 
     function _enqueue(address user, uint256 amount) internal {
-        if (amount < minQueueEntryWei) {
+        uint256 minimum = _effectiveMinQueueEntry();
+        if (amount < minimum) {
             revert RedeemTooSmall();
         }
         queue.push(QueueEntry({user: user, amount: amount}));
@@ -855,14 +870,29 @@ contract NavBNBv2 {
             }
             entry.amount -= pay;
             totalLiabilitiesBNB -= pay;
+            if (entry.user.code.length > 0) {
+                _creditClaimable(entry.user, pay);
+                credited += pay;
+                remainingCap -= pay;
+                if (pay >= remainingLiquid) {
+                    remainingLiquid = 0;
+                } else {
+                    remainingLiquid -= pay;
+                }
+                if (entry.amount == 0) {
+                    head++;
+                    steps++;
+                } else {
+                    break;
+                }
+                continue;
+            }
             (bool success,) = entry.user.call{value: pay, gas: MAX_GAS_PER_PAY}("");
             if (!success) {
                 uint256 creditedAmount = pay + entry.amount;
                 entry.amount = 0;
                 totalLiabilitiesBNB -= creditedAmount - pay;
-                claimableBNB[entry.user] += creditedAmount;
-                totalClaimableBNB += creditedAmount;
-                emit ClaimableCredited(entry.user, creditedAmount);
+                _creditClaimable(entry.user, creditedAmount);
                 credited += creditedAmount;
                 if (creditedAmount >= remainingLiquid) {
                     remainingLiquid = 0;
@@ -872,11 +902,11 @@ contract NavBNBv2 {
                 head++;
                 steps++;
                 continue;
-            } else {
-                paid += pay;
-                remainingCap -= pay;
-                remainingLiquid -= pay;
             }
+            paid += pay;
+            remainingCap -= pay;
+            remainingLiquid -= pay;
+            emit QueuePaid(entry.user, pay);
             if (entry.amount == 0) {
                 head++;
                 steps++;
@@ -1148,11 +1178,42 @@ contract NavBNBv2 {
         }
         address token = abi.decode(data, (address));
         if (token == address(0)) {
-            return;
+            revert StrategyTokenAddressZero(strategyAddress, selector);
         }
         if (IERC20(token).balanceOf(strategyAddress) != 0) {
             revert StrategyNotEmpty();
         }
+    }
+
+    function _creditClaimable(address user, uint256 amount) internal {
+        if (amount == 0) {
+            return;
+        }
+        claimableBNB[user] += amount;
+        totalClaimableBNB += amount;
+        emit ClaimableCredited(user, amount);
+    }
+
+    function _activeQueueLength() internal view returns (uint256) {
+        uint256 head = queueHead;
+        uint256 len = queue.length;
+        return len > head ? len - head : 0;
+    }
+
+    function _effectiveMinQueueEntry() internal view returns (uint256) {
+        uint256 base = minQueueEntryWei;
+        uint256 active = _activeQueueLength();
+        if (active == 0 || base == 0) {
+            return base;
+        }
+        uint256 extra = (active / QUEUE_ENTRY_SCALE) * base;
+        uint256 remainder = active % QUEUE_ENTRY_SCALE;
+        extra += (remainder * base) / QUEUE_ENTRY_SCALE;
+        uint256 scaled = base + extra;
+        if (scaled > MIN_QUEUE_ENTRY_WEI_UPPER) {
+            return MIN_QUEUE_ENTRY_WEI_UPPER;
+        }
+        return scaled;
     }
 
     function _clearPendingStrategy() internal {

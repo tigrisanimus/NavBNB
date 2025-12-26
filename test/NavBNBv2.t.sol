@@ -8,6 +8,7 @@ import "src/NavBNBv2.sol";
 import "test/mocks/MockBNBYieldStrategy.sol";
 import "test/mocks/MockTokenHoldingStrategy.sol";
 import "test/mocks/MockOpaqueStrategy.sol";
+import "test/mocks/MockZeroTokenStrategy.sol";
 import "test/mocks/MockERC20.sol";
 
 contract ToggleReceiver {
@@ -113,6 +114,8 @@ contract NavBNBv2Test is NoLogBound {
     using stdStorage for StdStorage;
 
     NavBNBv2 internal nav;
+    MockERC20 internal ankr;
+    MockERC20 internal wbnb;
     address internal guardian = address(0xBEEF);
     address internal recovery = address(0xCAFE);
     address internal alice = address(0xA11CE);
@@ -120,6 +123,8 @@ contract NavBNBv2Test is NoLogBound {
 
     function setUp() public {
         nav = new NavBNBv2(guardian, recovery);
+        ankr = new MockERC20("ankrBNB", "ankrBNB");
+        wbnb = new MockERC20("WBNB", "WBNB");
         vm.prank(guardian);
         nav.setExitFeeConfig(0, 1 days, 0);
         vm.prank(guardian);
@@ -130,6 +135,10 @@ contract NavBNBv2Test is NoLogBound {
         vm.deal(bob, 1_000 ether);
         vm.deal(guardian, 1_000 ether);
         vm.deal(recovery, 1_000 ether);
+    }
+
+    function _newMockStrategy() internal returns (MockBNBYieldStrategy) {
+        return new MockBNBYieldStrategy(address(ankr), address(wbnb));
     }
 
     function _activateStrategy(address newStrategy) internal {
@@ -156,17 +165,17 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function _emergencyFee(uint256 bnbOwed) internal view returns (uint256) {
+        if (bnbOwed == 0) {
+            return 0;
+        }
         uint256 quotient = bnbOwed / nav.BPS();
         uint256 remainder = bnbOwed % nav.BPS();
         uint256 fee = quotient * nav.EMERGENCY_FEE_BPS();
-        uint256 remainderFee = remainder * nav.EMERGENCY_FEE_BPS();
-        if (remainderFee != 0) {
+        if (remainder != 0) {
+            uint256 remainderFee = remainder * nav.EMERGENCY_FEE_BPS();
             fee += (remainderFee + nav.BPS() - 1) / nav.BPS();
         }
-        if (fee > bnbOwed) {
-            fee = bnbOwed;
-        }
-        if (bnbOwed > 0 && fee >= bnbOwed) {
+        if (fee >= bnbOwed) {
             fee = bnbOwed - 1;
         }
         return fee;
@@ -180,8 +189,16 @@ contract NavBNBv2Test is NoLogBound {
         vm.store(address(nav), bytes32(uint256(18)), bytes32(length));
     }
 
+    function _setQueueLengthFor(address target, uint256 length) internal {
+        vm.store(target, bytes32(uint256(18)), bytes32(length));
+    }
+
     function _setQueueHead(uint256 head) internal {
         stdstore.target(address(nav)).sig("queueHead()").checked_write(head);
+    }
+
+    function _setQueueHeadFor(address target, uint256 head) internal {
+        stdstore.target(target).sig("queueHead()").checked_write(head);
     }
 
     function _setQueueEntry(uint256 index, address user, uint256 amount) internal {
@@ -228,7 +245,7 @@ contract NavBNBv2Test is NoLogBound {
 
     function testRedeemRejectsQueueEntriesBelowMinimum() public {
         _setMinQueueEntry(1 ether);
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -241,6 +258,24 @@ contract NavBNBv2Test is NoLogBound {
         vm.prank(alice);
         vm.expectRevert(NavBNBv2.RedeemTooSmall.selector);
         nav.redeem(tokenAmount, 0);
+    }
+
+    function testQueueDynamicMinEntryRisesWithActiveLength() public {
+        NavBNBv2Harness harness = new NavBNBv2Harness(guardian, recovery);
+        uint256 baseMin = 1e14;
+        vm.prank(guardian);
+        harness.setMinQueueEntryWei(baseMin);
+        _setQueueHeadFor(address(harness), 0);
+        _setQueueLengthFor(address(harness), 64);
+
+        uint256 expected = baseMin + (baseMin * 64) / harness.QUEUE_ENTRY_SCALE();
+        assertEq(harness.effectiveMinQueueEntry(), expected);
+
+        vm.expectRevert(NavBNBv2.RedeemTooSmall.selector);
+        harness.enqueue(alice, expected - 1);
+
+        harness.enqueue(alice, expected);
+        assertEq(harness.queueLength(), 65);
     }
 
     function testEmergencyRedeemAcceptsDustWithOverride() public {
@@ -257,6 +292,24 @@ contract NavBNBv2Test is NoLogBound {
         uint256 balanceAfter = alice.balance;
 
         assertEq(balanceAfter - balanceBefore, expectedOut);
+    }
+
+    function testEmergencyRedeemTinyAmountPaysAtLeastOneWei() public {
+        _setMinPayout(1);
+        vm.prank(alice);
+        nav.deposit{value: 1}(0);
+
+        uint256 shares = nav.balanceOf(alice);
+        (uint256 bnbOut, uint256 fee) = nav.previewEmergencyRedeem(shares);
+        assertEq(bnbOut, 1);
+        assertEq(fee, 0);
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        nav.emergencyRedeem(shares, 0, true);
+        uint256 balanceAfter = alice.balance;
+
+        assertEq(balanceAfter - balanceBefore, 1);
     }
 
     function testForcedBnbUpdatesNav() public {
@@ -338,7 +391,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testReceiveAcceptsStrategyReturn() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
 
         vm.deal(address(mock), 1 ether);
@@ -350,7 +403,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testTotalAssetsIncludesStrategy() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
 
         vm.prank(alice);
@@ -362,7 +415,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testStrategyWithdrawFailureSignalsAccurately() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -385,7 +438,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testSetStrategyRevertsWhenCurrentStrategyNotEmpty() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
 
         mock.setAssets(1 ether);
@@ -399,7 +452,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testSetStrategyRevertsWhenNewStrategyNotEmpty() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         mock.setAssets(1 ether);
 
         vm.prank(guardian);
@@ -445,9 +498,36 @@ contract NavBNBv2Test is NoLogBound {
         nav.activateStrategy();
     }
 
+    function testStrategyActivationFailsWhenTokenAddressZero() public {
+        MockZeroTokenStrategy zeroToken = new MockZeroTokenStrategy();
+
+        vm.prank(guardian);
+        nav.proposeStrategy(address(zeroToken));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                NavBNBv2.StrategyTokenAddressZero.selector, address(zeroToken), bytes4(keccak256("ankrBNB()"))
+            )
+        );
+        nav.activateStrategy();
+    }
+
+    function testActivateStrategyRevertsWhenPendingBalanceNonZero() public {
+        MockBNBYieldStrategy next = _newMockStrategy();
+        vm.deal(address(next), 1 ether);
+
+        vm.prank(guardian);
+        nav.proposeStrategy(address(next));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        vm.expectRevert(NavBNBv2.StrategyNotEmpty.selector);
+        nav.activateStrategy();
+    }
+
     function testSetStrategySucceedsWhenStrategiesEmpty() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
-        MockBNBYieldStrategy mockNext = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
+        MockBNBYieldStrategy mockNext = _newMockStrategy();
 
         _activateStrategy(address(mock));
         assertEq(address(nav.strategy()), address(mock));
@@ -460,7 +540,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testStrategyMigrationUpdatesTrackedAssets() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -477,8 +557,27 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(nav.untrackedSurplusBNB(), 0);
     }
 
+    function testStrategyMigrationSweepsOldStrategy() public {
+        MockBNBYieldStrategy oldStrategy = _newMockStrategy();
+        _activateStrategy(address(oldStrategy));
+
+        oldStrategy.setAssets(2 ether);
+        vm.deal(address(oldStrategy), 2 ether);
+
+        MockBNBYieldStrategy nextStrategy = _newMockStrategy();
+        vm.prank(guardian);
+        nav.proposeStrategy(address(nextStrategy));
+        vm.warp(nav.strategyActivationTime());
+        vm.prank(guardian);
+        nav.activateStrategy();
+
+        assertEq(oldStrategy.totalAssets(), 0);
+        assertEq(address(oldStrategy).balance, 0);
+        assertEq(address(nav.strategy()), address(nextStrategy));
+    }
+
     function testSetStrategyRevertsWhenTimelockEnabled() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
 
         vm.prank(guardian);
         vm.expectRevert(NavBNBv2.StrategyTimelockEnabled.selector);
@@ -486,7 +585,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testStrategyTimelockActivation() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
 
         vm.prank(guardian);
         nav.proposeStrategy(address(mock));
@@ -518,8 +617,8 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testActivateStrategyRevertsWhenCurrentNotEmpty() public {
-        MockBNBYieldStrategy current = new MockBNBYieldStrategy();
-        MockBNBYieldStrategy next = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy current = _newMockStrategy();
+        MockBNBYieldStrategy next = _newMockStrategy();
 
         _activateStrategy(address(current));
 
@@ -536,7 +635,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testActivateStrategyRevertsWhenNewNotEmpty() public {
-        MockBNBYieldStrategy next = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy next = _newMockStrategy();
         next.setAssets(1 ether);
 
         vm.prank(guardian);
@@ -549,7 +648,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testDepositInvestsExcessAboveBuffer() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(100);
@@ -563,7 +662,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testRedeemQueuesWhenLiquidityLow() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -588,7 +687,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testClaimUsesStrategyToMeetQueuedRedemption() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -611,7 +710,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testClaimBestEffortPaysPartialStrategyWithdraw() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -657,7 +756,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testNavUsesNetAssetsNotGross() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -694,7 +793,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testNavNonZeroAtParity() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -732,7 +831,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testClaimFairnessFifo() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1153,7 +1252,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testEmergencyRedeemDoesNotTouchQueue() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1201,7 +1300,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testEmergencyRedeemCannotDrainReserve() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1245,7 +1344,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testRedeemPaysQueueBeforeNewRedemption() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1270,7 +1369,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testClaimBoundedSteps() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1303,7 +1402,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testClaimBoundedStepsProgresses() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1363,7 +1462,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testWithdrawClaimablePaysPartialWhenStrategyPartial() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1385,7 +1484,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testQueueHeadRevertEscrowsAndMovesOn() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1466,7 +1565,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testQueueHeadFailureDoesNotLimitLaterPayments() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1521,12 +1620,14 @@ contract NavBNBv2Test is NoLogBound {
         _setQueueHead(0);
         stdstore.target(address(nav)).sig("totalLiabilitiesBNB()").checked_write(2 ether);
 
+        uint256 badBalanceBefore = address(bad).balance;
         uint256 goodBalanceBefore = good.balance;
         vm.prank(alice);
         nav.claim(2);
         uint256 goodBalanceAfter = good.balance;
 
         assertEq(goodBalanceAfter - goodBalanceBefore, 1 ether);
+        assertEq(address(bad).balance, badBalanceBefore);
         assertEq(nav.claimableBNB(address(bad)), 1 ether);
         assertEq(nav.totalLiabilitiesBNB(), 0);
 
@@ -1537,7 +1638,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testWithdrawClaimablePaysOut() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1571,7 +1672,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testWithdrawClaimableCallsStrategyOnce() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1605,7 +1706,7 @@ contract NavBNBv2Test is NoLogBound {
     }
 
     function testWithdrawClaimableBestEffortKeepsRemainder() public {
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1796,10 +1897,28 @@ contract NavBNBv2Test is NoLogBound {
         assertEq(firstUser, recovery);
     }
 
+    function testCompactQueueBoundedReducesStorageOverTime() public {
+        uint256 len = 80;
+        uint256 head = 40;
+        _setQueueLength(len);
+        for (uint256 i = 0; i < len; i++) {
+            _setQueueEntry(i, address(uint160(0x2000 + i)), 1 ether);
+        }
+        _setQueueHead(head);
+
+        uint256 remaining = len - head;
+        for (uint256 i = 0; i < 20; i++) {
+            nav.compactQueue(5);
+        }
+
+        assertEq(nav.queueHead(), 0);
+        assertEq(nav.queueLength(), remaining);
+    }
+
     function testAutoCompactionMaintainsQueueInvariants() public {
         uint256 minEntry = 0.01 ether;
         _setMinQueueEntry(minEntry);
-        MockBNBYieldStrategy mock = new MockBNBYieldStrategy();
+        MockBNBYieldStrategy mock = _newMockStrategy();
         _activateStrategy(address(mock));
         vm.prank(guardian);
         nav.setLiquidityBufferBPS(0);
@@ -1821,7 +1940,7 @@ contract NavBNBv2Test is NoLogBound {
         uint256[] memory amounts = new uint256[](entries);
         for (uint256 i = 0; i < entries; i++) {
             address user = users[i % users.length];
-            uint256 bnbTarget = minEntry * 2;
+            uint256 bnbTarget = nav.effectiveMinQueueEntry() * 2;
             uint256 shares = (bnbTarget * 1e18) / nav.nav();
             if (shares == 0) {
                 shares = 1;

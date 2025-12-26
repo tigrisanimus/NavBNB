@@ -11,6 +11,7 @@ contract MockRouter {
     uint256 public swapCallCount;
     uint256 public lastDeadline;
     uint256 public lastAmountIn;
+    uint256 public lastAmountOutMin;
 
     constructor(address ankrBNB_, address wbnb_) {
         ankrBNB = MockERC20(ankrBNB_);
@@ -45,6 +46,7 @@ contract MockRouter {
         swapCallCount += 1;
         lastDeadline = deadline;
         lastAmountIn = amountIn;
+        lastAmountOutMin = amountOutMin;
         uint256 expectedOut = (amountIn * rate) / 1e18;
         uint256 available = wbnb.balanceOf(address(this));
         if (liquidityOut != 0 && liquidityOut < available) {

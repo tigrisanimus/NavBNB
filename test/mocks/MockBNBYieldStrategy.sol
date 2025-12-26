@@ -10,6 +10,13 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
     uint256 internal maxWithdraw;
     uint256 internal withdrawCalls;
     uint256 internal withdrawRatioBps;
+    address internal immutable ankrToken;
+    address internal immutable wbnbToken;
+
+    constructor(address ankrToken_, address wbnbToken_) {
+        ankrToken = ankrToken_;
+        wbnbToken = wbnbToken_;
+    }
 
     function deposit() external payable {
         stored += msg.value;
@@ -48,12 +55,12 @@ contract MockBNBYieldStrategy is IBNBYieldStrategy {
         return stored;
     }
 
-    function ankrBNB() external pure returns (address) {
-        return address(0);
+    function ankrBNB() external view returns (address) {
+        return ankrToken;
     }
 
-    function wbnb() external pure returns (address) {
-        return address(0);
+    function wbnb() external view returns (address) {
+        return wbnbToken;
     }
 
     function withdrawCallCount() external view returns (uint256) {
